@@ -5,7 +5,13 @@ import os
 
 def load_data(config: dict[str, str]) -> pd.DataFrame:
     """
-    Load the data from the specified directory
+    Loads the data based on the provided config.
+    Returns a DataFrame with the data in the following columns and types:
+    - case_id: str
+    - resource: str
+    - activity_name: str
+    - start_timestamp: pd.Timestamp
+    - end_timestamp: pd.Timestamp
     """
     data_dir = os.path.join("data", "input", config["input_filename"])
     df = pd.read_csv(data_dir)

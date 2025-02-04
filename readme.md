@@ -13,8 +13,8 @@ To run the environment, drop your event logs in the `data/input` folder. Change 
 The code used for pre-processing the data is in the `preprocessing` folder. The steps in pre-processing include:
 
 1. Loading the data
-2. Eliminating short-path traces (yet to be implemented)
-3. Discovering source and target activities (yet to be implemented)
+2. Eliminating short-path traces, i.e. shorter than 3 states (WIP)
+3. Discovering source and target activities (WIP)
 
 ### Agent Discovery
 

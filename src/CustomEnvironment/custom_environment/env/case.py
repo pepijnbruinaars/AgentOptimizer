@@ -10,7 +10,7 @@ class Case:
         # List of activities already performed in the case
         self.activities_performed: list[int] = []
         # Timestamp when the case started
-        self.case_start_timestamp: pd.Timestamp = start_timestamp
+        self.start_timestamp: pd.Timestamp = start_timestamp
         # Current timestamp of the case
         self.current_timestamp: pd.Timestamp = start_timestamp
         # List of additional activities that can be performed next
