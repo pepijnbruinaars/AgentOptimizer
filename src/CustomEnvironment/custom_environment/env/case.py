@@ -18,8 +18,14 @@ class Case:
         self.potential_additional_agents: list[int] = []
         self.previous_agent = -1  # ID of the previous agent that performed an activity
 
+    def __repr__(self) -> str:
+        return f"Case(ID: {self.case_id}, start: {self.start_timestamp}, done: {self.is_done})"
+
+    def __str__(self) -> str:
+        return f"Case {self.case_id} (started at {self.start_timestamp})"
+
     def get_last_activity(self) -> int | None:
-        """Return the last activity performed in the case."""
+        """Return the last/most recent activity performed in the case."""
         if len(self.activities_performed) == 0:
             return None
         else:
