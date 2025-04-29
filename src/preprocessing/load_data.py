@@ -41,5 +41,10 @@ def load_data(config: dict[str, str]) -> pd.DataFrame:
     processed_df[["start_timestamp", "end_timestamp"]] = df[
         ["start_timestamp", "end_timestamp"]
     ].apply(partial(pd.to_datetime, format="mixed"))
+    # Convert times to UTC
+    processed_df["start_timestamp"] = processed_df["start_timestamp"].dt.tz_convert(
+        "UTC"
+    )
+    processed_df["end_timestamp"] = processed_df["end_timestamp"].dt.tz_convert("UTC")
 
     return processed_df
