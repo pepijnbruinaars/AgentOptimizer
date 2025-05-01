@@ -180,7 +180,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
                             f"Conflict between agents {agent.id} and {other_agent.id}",
                             "red",
                         )
-
+    
         ### ------------------------------- ###
         ### CHECK COMPLETED TASKS/CASES     ###
         ### ------------------------------- ###
