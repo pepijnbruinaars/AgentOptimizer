@@ -11,6 +11,7 @@ from env_config import debug_print_colored
 from .reward import get_reward
 from .objects import Case, Task, ResourceAgent, Status
 from display import display_indented_list
+from .data_handling import compute_activity_duration_distribution_per_agent
 from .constants import MAX_TASKS_PER_AGENT
 
 
@@ -55,13 +56,22 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.resource_dict: dict[str, int] = {
             resource: i for i, resource in enumerate(self.resources)
         }
+        activity_durations_dict = compute_activity_duration_distribution_per_agent(self.data)
+        transformed_activity_durations_dict = {
+            self.resource_dict[resource]: {
+                task: activity_durations_dict[resource][task]
+                for task in sorted(set(self.data["activity_name"]))
+            }
+            for resource in self.resources
+        }
+
         self.agents: list[ResourceAgent] = [
             ResourceAgent(
                 self.resource_dict[resource],
-                {
-                    task_id: lambda: np.random.randint(1, 10)
-                    for task_id in range(self.num_activities)
-                },
+                capabilities={
+                    self.task_dict[task]: transformed_activity_durations_dict[self.resource_dict[resource]][task]
+                    for task in sorted(set(self.data["activity_name"]))
+                }
             )
             for resource in self.resources
         ]
@@ -129,22 +139,31 @@ class AgentOptimizerEnvironment(ParallelEnv):
         ### -------------------------------- ###
         ### HANDLE ACTION FROM CURRENT STEP  ###
         ### -------------------------------- ###
-        if self.upcoming_case is not None:
+        if self.upcoming_case is not None and self.upcoming_case.current_task is not None:
             # Check which agents volunteered for the task
             available_agents = [
                 agent_id for agent_id, action in actions.items() if action == 1
             ]
 
-            # If nobody volunteered, select all agents as available
+            # Filter available agents to only those who can perform the task
+            available_agents = [
+                agent_id for agent_id in available_agents if self.agents[agent_id].can_perform_task(self.upcoming_case.current_task.id)
+            ]
+
+            # If nobody volunteered, select all capable agents as available
             if not available_agents:
-                available_agents = [agent.id for agent in self.agents]
+                available_agents = [
+                    agent.id
+                    for agent in self.agents
+                    if agent.can_perform_task(self.upcoming_case.current_task.id)
+                ]
 
             # Select a random agent from volunteers
             selected_agent_id = np.random.choice(available_agents)
             selected_agent = self.agents[selected_agent_id]
 
-            # Assign the case to the selected agent
             debug_print_colored(f"Upcoming case: {self.upcoming_case}")
+            # Assign the case to the selected agent
             self.upcoming_case.assign_to_agent(selected_agent, self.current_time)
             # Reset upcoming_case to None after assignment to prevent duplicates
             self.upcoming_case = None

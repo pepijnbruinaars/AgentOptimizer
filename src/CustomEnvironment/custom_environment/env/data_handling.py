@@ -4,35 +4,6 @@ import numpy as np
 import pandas as pd
 
 
-def activity_name_to_id(data: pd.DataFrame, activity_name: str) -> int:
-    # Create unique set of activity names, then convert to list and get index using range
-    return list(sorted(set(data["activity_name"]))).index(activity_name)
-
-
-def activity_id_to_name(data: pd.DataFrame, activity_id: int) -> str:
-    # Create unique set of activity names, then convert to list and get index using range
-    return list(sorted(set(data["activity_name"])))[activity_id]
-
-
-def find_first_case_activity(data: pd.DataFrame, case_id: int) -> int:
-    """Find the first activity in a case.
-
-    Args:
-        data (pd.DataFrame): The event log data
-        case_id (int): The case ID
-
-    Returns:
-        int: The ID of the first activity in the case
-    """
-    case_data = data[data["case_id"] == case_id]
-    print(case_data)
-    first_activity = case_data["activity_name"][0]
-    first_activity_id = activity_name_to_id(data, first_activity)
-    # Check if the first activity is missing or is not an integer
-    if pd.isna(first_activity_id) or not isinstance(first_activity_id, int):
-        raise ValueError(f"Case {case_id} has no first activity")
-    return first_activity_id
-
 def compute_agent_activity_durations(data: pd.DataFrame) -> dict[str, dict[str, np.ndarray]]:
     """Collects the activity durations for each agent in the event log.
     This function is an adaptation from the original code (_compute_activity_duration_distribution) made for the AgentSim paper.
@@ -60,20 +31,23 @@ def compute_agent_activity_durations(data: pd.DataFrame) -> dict[str, dict[str, 
     print(f"Activity durations for agents: {activity_durations}")
     return activity_durations
 
-def sample_normal(mean: float, std: float) -> float:
+def sample_normal(mean: float, std: float, min: float, max: float) -> float:
     """Sample from a normal distribution with given mean and standard deviation.
 
     Args:
         mean (float): Mean of the normal distribution
         std (float): Standard deviation of the normal distribution
-        size (int): Number of samples to generate
+        min (float): Minimum value for the sample
+        max (float): Maximum value for the sample
 
     Returns:
         np.ndarray: Array of samples from the normal distribution
     """
     value = np.random.normal(loc=mean, scale=std)
-    if value < 0:
-        return mean
+    if value < min:
+        return min
+    if value > max:
+        return max
     return value
 
 def compute_activity_duration_distribution_per_agent(data: pd.DataFrame):
@@ -101,11 +75,14 @@ def compute_activity_duration_distribution_per_agent(data: pd.DataFrame):
                 if np.any(duration_list < 0):
                     raise ValueError(f"Negative duration found for agent {agent} and activity {act}")
 
+                # Calculate mean, std, min, and max
                 mean = float(np.mean(duration_list))
                 std = float(np.std(duration_list))
-                print(mean, std)
-                duration_distribution = partial(sample_normal, mean, std)
-                print("distribution sample", duration_distribution())
+                min = float(np.min(duration_list))
+                max = float(np.max(duration_list))
+
+                # Set the distribution function for the activity
+                duration_distribution = partial(sample_normal, mean, std, min, max)
                 activity_duration_distribution_per_agent[agent][act] = duration_distribution
 
     return activity_duration_distribution_per_agent

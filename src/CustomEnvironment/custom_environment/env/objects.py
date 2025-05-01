@@ -172,6 +172,7 @@ class Case:
     def work(self, timestamp: pd.Timestamp) -> bool:
         """Work on the case."""
         if self.current_task is None:
+            self.assigned_agent = None
             return True
 
         # Check if the task is already completed
@@ -189,8 +190,16 @@ class Case:
         # Update task state
         if self.assigned_agent is None:
             raise ValueError("Task must be assigned to an agent before working on it.")
+
+        distribution = self.assigned_agent.capabilities[self.current_task.id]
+        if distribution is None:
+            raise ValueError(
+                f"Agent {self.assigned_agent.id} cannot perform task {self.current_task.id}"
+            )
+        print(distribution)
+        print(distribution())
         task_is_done = self.current_task.work(
-            timestamp, self.assigned_agent.capabilities[self.current_task.id]()
+            timestamp, distribution()
         )
 
         if task_is_done:
@@ -282,13 +291,14 @@ class Case:
 class ResourceAgent:
     """Represents an agent that can work on cases and tasks."""
 
-    def __init__(self, resource_id: int, capabilities: dict[int, Callable]) -> None:
+    def __init__(self, resource_id: int, capabilities: dict[int, Callable[[], float] | None]) -> None:
         self.id: int = resource_id
         self.case_queue: Queue["Case"] = Queue()
         self.current_case: Optional[Case] = None
         self.busy_until: Optional[pd.Timestamp] = None
         # The distributions of each the agent's efficiency for each task
-        self.capabilities: dict[int, Callable] = capabilities
+        self.capabilities: dict[int, Callable[[], float] | None] = capabilities
+        print(capabilities)
 
     def __repr__(self) -> str:
         status = "busy" if self.is_busy() else "available"
@@ -308,6 +318,10 @@ class ResourceAgent:
             return case_is_done, case
 
         return False, case
+
+    def can_perform_task(self, task_id: int) -> bool:
+        """Check if the agent can perform a specific task."""
+        return task_id in self.capabilities and self.capabilities[task_id] is not None
 
     def is_busy(self) -> bool:
         """Check if the agent is currently busy."""
