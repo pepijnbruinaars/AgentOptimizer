@@ -28,7 +28,6 @@ def compute_agent_activity_durations(data: pd.DataFrame) -> dict[str, dict[str, 
             raise ValueError(f"Invalid duration for agent {agent} and activity {activity}")
         activity_durations[agent][activity] = np.append(activity_durations[agent][activity], duration)
 
-    print(f"Activity durations for agents: {activity_durations}")
     return activity_durations
 
 def sample_normal(mean: float, std: float, min: float, max: float) -> float:

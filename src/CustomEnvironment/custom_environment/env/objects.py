@@ -2,9 +2,7 @@ from enum import Enum
 import pandas as pd
 from typing import Callable, Optional, List, Tuple
 
-from display import print_colored
 from .typed_queue import Queue
-import random
 from env_config import debug_print_colored
 
 
@@ -191,16 +189,12 @@ class Case:
         if self.assigned_agent is None:
             raise ValueError("Task must be assigned to an agent before working on it.")
 
-        distribution = self.assigned_agent.capabilities[self.current_task.id]
-        if distribution is None:
+        duration_distribution = self.assigned_agent.capabilities[self.current_task.id]
+        if duration_distribution is None:
             raise ValueError(
                 f"Agent {self.assigned_agent.id} cannot perform task {self.current_task.id}"
             )
-        print(distribution)
-        print(distribution())
-        task_is_done = self.current_task.work(
-            timestamp, distribution()
-        )
+        task_is_done = self.current_task.work(timestamp, duration_distribution())
 
         if task_is_done:
             self._complete_task(timestamp)
@@ -291,14 +285,15 @@ class Case:
 class ResourceAgent:
     """Represents an agent that can work on cases and tasks."""
 
-    def __init__(self, resource_id: int, capabilities: dict[int, Callable[[], float] | None]) -> None:
+    def __init__(
+        self, resource_id: int, capabilities: dict[int, Callable[[], float] | None]
+    ) -> None:
         self.id: int = resource_id
         self.case_queue: Queue["Case"] = Queue()
         self.current_case: Optional[Case] = None
         self.busy_until: Optional[pd.Timestamp] = None
         # The distributions of each the agent's efficiency for each task
         self.capabilities: dict[int, Callable[[], float] | None] = capabilities
-        print(capabilities)
 
     def __repr__(self) -> str:
         status = "busy" if self.is_busy() else "available"

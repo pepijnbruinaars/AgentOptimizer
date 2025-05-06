@@ -1,11 +1,12 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from collections import deque
-import random
+import os
+
 
 from .networks import ActorNetwork, CriticNetwork
+
 
 class MAPPOAgent:
     def __init__(
@@ -19,7 +20,7 @@ class MAPPOAgent:
         clip_param=0.2,
         batch_size=64,
         num_epochs=10,
-        buffer_size=2048
+        buffer_size=2048,
     ):
         self.env = env
         self.n_agents = len(env.agents)
@@ -38,7 +39,9 @@ class MAPPOAgent:
 
         # Create centralized critic
         first_agent = env.agents[0]
-        self.critic = CriticNetwork(env.observation_space(first_agent.id), self.n_agents, hidden_size)
+        self.critic = CriticNetwork(
+            env.observation_space(first_agent.id), self.n_agents, hidden_size
+        )
 
         # Setup optimizers
         self.actor_optimizers = {
@@ -49,14 +52,14 @@ class MAPPOAgent:
 
         # Experience buffer
         self.buffer = {
-            'obs': [],
-            'actions': [],
-            'rewards': [],
-            'dones': [],
-            'values': [],
-            'action_probs': [],
-            'advantages': [],
-            'returns': []
+            "obs": [],
+            "actions": [],
+            "rewards": [],
+            "dones": [],
+            "values": [],
+            "action_probs": [],
+            "advantages": [],
+            "returns": [],
         }
 
         # For tracking training performance
@@ -84,21 +87,21 @@ class MAPPOAgent:
 
     def store_experience(self, obs, actions, action_probs, rewards, dones, values):
         """Store experience in the buffer."""
-        self.buffer['obs'].append(obs)
-        self.buffer['actions'].append(actions)
-        self.buffer['action_probs'].append(action_probs)
-        self.buffer['rewards'].append(rewards)
-        self.buffer['dones'].append(dones)
-        self.buffer['values'].append(values)
+        self.buffer["obs"].append(obs)
+        self.buffer["actions"].append(actions)
+        self.buffer["action_probs"].append(action_probs)
+        self.buffer["rewards"].append(rewards)
+        self.buffer["dones"].append(dones)
+        self.buffer["values"].append(values)
 
     def compute_advantages_and_returns(self):
         """Compute GAE advantages and returns for stored trajectories."""
-        values = np.array(self.buffer['values'])
-        rewards = np.array(self.buffer['rewards'])
-        dones = np.array(self.buffer['dones'])
+        values = np.array(self.buffer["values"])
+        rewards = np.array(self.buffer["rewards"])
+        dones = np.array(self.buffer["dones"])
 
         # Add a final value estimate for bootstrapping
-        last_obs = self.buffer['obs'][-1]
+        last_obs = self.buffer["obs"][-1]
         last_value = self.compute_values(last_obs)
         values = np.append(values, last_value)
 
@@ -119,27 +122,27 @@ class MAPPOAgent:
             advantages[t] = gae
             returns[t] = advantages[t] + values[t]
 
-        self.buffer['advantages'] = advantages
-        self.buffer['returns'] = returns
+        self.buffer["advantages"] = advantages  # type: ignore
+        self.buffer["returns"] = returns  # type: ignore
 
     def update_policy(self):
         """Update policy and value networks using PPO."""
         # Skip if not enough data
-        if len(self.buffer['obs']) < self.batch_size:
+        if len(self.buffer["obs"]) < self.batch_size:
             return
-
+        print("here")
         # Compute advantages and returns
         self.compute_advantages_and_returns()
 
         # Get buffer data
-        observations = self.buffer['obs']
-        actions = self.buffer['actions']
-        old_action_probs = self.buffer['action_probs']
-        returns = self.buffer['returns']
-        advantages = self.buffer['advantages']
+        observations = self.buffer["obs"]
+        actions = self.buffer["actions"]
+        old_action_probs = self.buffer["action_probs"]
+        returns = self.buffer["returns"]
+        advantages = self.buffer["advantages"]
 
         # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)  # type: ignore
 
         # Convert to tensors
         advantages_tensor = torch.FloatTensor(advantages)
@@ -177,8 +180,16 @@ class MAPPOAgent:
                 for agent_id in self.actors:
                     actor = self.actors[agent_id]
                     optimizer = self.actor_optimizers[agent_id]
-
+                    print("updating actor", agent_id)
                     for i, obs_dict in enumerate(batch_obs):
+                        print(
+                            "updating actor",
+                            agent_id,
+                            "for batch",
+                            i,
+                            "of",
+                            len(batch_obs),
+                        )
                         if agent_id in obs_dict:
                             obs = obs_dict[agent_id]
                             action = batch_actions[i][agent_id]
@@ -194,7 +205,12 @@ class MAPPOAgent:
 
                             # Compute surrogate losses
                             surrogate1 = ratio * advantage
-                            surrogate2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advantage
+                            surrogate2 = (
+                                torch.clamp(
+                                    ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+                                )
+                                * advantage
+                            )
 
                             # Actor loss
                             actor_loss = -torch.min(surrogate1, surrogate2)
@@ -206,19 +222,22 @@ class MAPPOAgent:
 
         # Clear the buffer after updating
         self.buffer = {
-            'obs': [],
-            'actions': [],
-            'rewards': [],
-            'dones': [],
-            'values': [],
-            'action_probs': [],
-            'advantages': [],
-            'returns': []
+            "obs": [],
+            "actions": [],
+            "rewards": [],
+            "dones": [],
+            "values": [],
+            "action_probs": [],
+            "advantages": [],
+            "returns": [],
         }
 
     def save_models(self, path):
         """Save model weights to the specified path."""
         # Save critic
+        # Check if directory exists, if not create it
+        if not os.path.exists(path):
+            os.makedirs(path)
         torch.save(self.critic.state_dict(), f"{path}/critic.pt")
 
         # Save actors

@@ -56,7 +56,9 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.resource_dict: dict[str, int] = {
             resource: i for i, resource in enumerate(self.resources)
         }
-        activity_durations_dict = compute_activity_duration_distribution_per_agent(self.data)
+        activity_durations_dict = compute_activity_duration_distribution_per_agent(
+            self.data
+        )
         transformed_activity_durations_dict = {
             self.resource_dict[resource]: {
                 task: activity_durations_dict[resource][task]
@@ -69,9 +71,11 @@ class AgentOptimizerEnvironment(ParallelEnv):
             ResourceAgent(
                 self.resource_dict[resource],
                 capabilities={
-                    self.task_dict[task]: transformed_activity_durations_dict[self.resource_dict[resource]][task]
+                    self.task_dict[task]: transformed_activity_durations_dict[
+                        self.resource_dict[resource]
+                    ][task]
                     for task in sorted(set(self.data["activity_name"]))
-                }
+                },
             )
             for resource in self.resources
         ]
@@ -139,7 +143,10 @@ class AgentOptimizerEnvironment(ParallelEnv):
         ### -------------------------------- ###
         ### HANDLE ACTION FROM CURRENT STEP  ###
         ### -------------------------------- ###
-        if self.upcoming_case is not None and self.upcoming_case.current_task is not None:
+        if (
+            self.upcoming_case is not None
+            and self.upcoming_case.current_task is not None
+        ):
             # Check which agents volunteered for the task
             available_agents = [
                 agent_id for agent_id, action in actions.items() if action == 1
@@ -147,7 +154,11 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
             # Filter available agents to only those who can perform the task
             available_agents = [
-                agent_id for agent_id in available_agents if self.agents[agent_id].can_perform_task(self.upcoming_case.current_task.id)
+                agent_id
+                for agent_id in available_agents
+                if self.agents[agent_id].can_perform_task(
+                    self.upcoming_case.current_task.id
+                )
             ]
 
             # If nobody volunteered, select all capable agents as available
@@ -180,7 +191,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
                             f"Conflict between agents {agent.id} and {other_agent.id}",
                             "red",
                         )
-    
+
         ### ------------------------------- ###
         ### CHECK COMPLETED TASKS/CASES     ###
         ### ------------------------------- ###
@@ -188,7 +199,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         for agent in self.agents:
             debug_print_colored(agent, "yellow")
         for agent in self.agents:
-            case_is_done = agent.work_case(self.current_time)
+            agent.work_case(self.current_time)
             if agent.busy_until and agent.busy_until <= self.current_time:
                 agent.busy_until = None
 
@@ -257,26 +268,36 @@ class AgentOptimizerEnvironment(ParallelEnv):
         ###      PREPARE OBSERVATIONS       ###
         ### ------------------------------- ###
         observations = {
-            agent.id: {
-                "task_id": (
-                    self.upcoming_case.current_task.id
-                    if self.upcoming_case and self.upcoming_case.current_task
-                    else 0
-                ),
-                "agent_id": agent.id,
-                "current_time": int(self.current_time.timestamp()),
-                "agents_capable_tasks": np.array(
-                    []
-                ),  # This could be populated based on agent skills
-                "agents_task_queue": np.array(
-                    [case.id for case in agent.case_queue], dtype=np.int32
-                ),
-                "agent_is_busy": np.array([agent.is_busy()], dtype=np.int8),
-            }
-            for agent in self.agents
+            agent.id: self._get_observations(agent) for agent in self.agents
         }
 
         return observations, rewards, terminations, truncations, {}
+
+    def _get_observations(self, agent: ResourceAgent):
+        # Fill with -1, and the keys for the capabilities
+        capable_tasks = np.zeros(self.num_activities, dtype=np.int32)
+        for task_id in agent.capabilities.keys():
+            capable_tasks[task_id] = 1
+
+        task_queue = np.zeros(MAX_TASKS_PER_AGENT, dtype=np.int32)
+
+        for i in range(min(agent.case_queue.size(), MAX_TASKS_PER_AGENT)):
+            case = agent.case_queue.peek(i)
+            if case:
+                task_queue[i] = case.id
+
+        return {
+            "task_id": (
+                self.upcoming_case.current_task.id
+                if self.upcoming_case and self.upcoming_case.current_task
+                else -1
+            ),
+            "agent_id": agent.id,
+            "current_time": int(self.current_time.timestamp()),
+            "agents_capable_tasks": capable_tasks,
+            "agents_task_queue": task_queue,
+            "agent_is_busy": np.array([agent.is_busy()], dtype=np.int8),
+        }
 
     def render(self) -> None:
         """Renders the environment."""
@@ -321,6 +342,22 @@ class AgentOptimizerEnvironment(ParallelEnv):
             }
         )
 
+    def reset(self, seed: int | None = None, options=None) -> tuple[dict, dict]:
+        """Resets the environment to its initial state."""
+        self.steps = 0
+        self.epochs += 1
+        self.current_time = self.data["start_timestamp"].min()
+        self.future_cases = self._initialize_future_cases()
+        self.pending_cases = []
+        self.completed_cases = []
+        self.upcoming_case = None
+
+        observations = {
+            agent.id: self._get_observations(agent) for agent in self.agents
+        }
+
+        return observations, {}
+
     def action_space(self, agent: int) -> Discrete:
         """Returns the action space for a single agent."""
         return Discrete(2)
@@ -361,7 +398,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
             # Safety check: ensure we always move forward in time
             if next_time <= self.current_time:
                 debug_print_colored(
-                    f"⚠️ Time not progressing. Forcing small time increment.",
+                    "⚠️ Time not progressing. Forcing small time increment.",
                     "red",
                 )
                 # Force a small time increment
