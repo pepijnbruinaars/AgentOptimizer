@@ -1,5 +1,6 @@
 from functools import partial
-import pandas as pd
+from collections import defaultdict
+import pandas as pd  # type: ignore
 import os
 
 
@@ -48,3 +49,35 @@ def load_data(config: dict[str, str]) -> pd.DataFrame:
     processed_df["end_timestamp"] = processed_df["end_timestamp"].dt.tz_convert("UTC")
 
     return processed_df
+
+
+def split_data(df: pd.DataFrame, split: float = 0.8):
+    # Split data into training and testing sets, taking into account the case_id and splitting such that no day is split between the sets
+    # Get unique case_ids
+    case_ids = df["case_id"].unique()
+    case_dates = df.groupby("case_id")["start_timestamp"].min().dt.date
+
+    # Shuffle case_ids
+
+    # Split case_ids into training and testing sets
+    train_case_ids = set()
+    test_case_ids = set()
+
+    # Date split, so that no day or case is split between the sets
+    case_dates = sorted(case_dates)
+    date_split_index = int(len(case_dates) * split)
+
+    for i in range(len(case_ids)):
+        if case_dates[i] in case_dates[:date_split_index]:
+            train_case_ids.add(case_ids[i])
+        else:
+            test_case_ids.add(case_ids[i])
+
+    # Create training and testing sets
+    train_df = df[df["case_id"].isin(train_case_ids)]
+    test_df = df[df["case_id"].isin(test_case_ids)]
+    print(f"Train set size: {len(train_df)}, Test set size: {len(test_df)}")
+    print(
+        f"Proportion of train set: {len(train_df) / (len(test_df) + len(train_df)):.2f}"
+    )
+    return train_df, test_df

@@ -321,3 +321,12 @@ class ResourceAgent:
     def is_busy(self) -> bool:
         """Check if the agent is currently busy."""
         return self.busy_until is not None or self.current_case is not None
+
+    @property
+    def task_duration(self) -> Optional[float]:
+        """Get the duration of the task the agent is currently working on."""
+        if self.current_case is None or self.current_case.current_task is None:
+            return -1
+        if self.current_case.current_task.duration is not None:
+            return self.current_case.current_task.duration
+        return -1

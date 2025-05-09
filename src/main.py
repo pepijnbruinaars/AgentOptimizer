@@ -11,7 +11,7 @@ from MAPPO.trainer import MAPPOTrainer
 
 from config import config
 from display import print_colored
-from preprocessing.load_data import load_data
+from preprocessing.load_data import load_data, split_data
 from preprocessing.preprocessing import remove_short_cases
 
 import env_config
@@ -89,6 +89,8 @@ def main(args):
     """Main function to run the environment with MAPPO."""
     # Load and preprocess data
     data = load_data(config)
+    train, test = split_data(data, split=0.8)
+
     simulation_parameters = SimulationParameters(
         {"start_timestamp": data["start_timestamp"].min()}
     )
