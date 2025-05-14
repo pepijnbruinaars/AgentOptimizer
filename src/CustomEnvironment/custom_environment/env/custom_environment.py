@@ -293,7 +293,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
                 else -1
             ),
             "agent_id": agent.id,
-            "task_duration": agent.task_duration,
+            "task_duration": agent.task_duration(self.current_time),
             "agents_capable_tasks": capable_tasks,
             "agents_task_queue": task_queue,
             "agent_is_busy": np.array([agent.is_busy()], dtype=np.int8),
@@ -324,7 +324,6 @@ class AgentOptimizerEnvironment(ParallelEnv):
         return GymDict(
             {
                 "task_id": Discrete(self.num_activities),
-                "agent_id": Discrete(len(self.agents)),
                 "task_duration": Box(low=0, high=np.inf, shape=(), dtype=np.int64),
                 "agents_capable_tasks": Box(
                     0,

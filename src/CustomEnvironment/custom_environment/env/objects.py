@@ -51,12 +51,23 @@ class Task:
         self.status = Status.IN_PROGRESS
         self.start_timestamp = timestamp
         self.duration = duration
-        self.completion_timestamp = timestamp + pd.Timedelta(minutes=duration)
+        self.completion_timestamp = timestamp + pd.Timedelta(seconds=duration)
         self.assigned_agent.busy_until = self.completion_timestamp
         debug_print_colored(
             f"Task {self.format()} started at {timestamp}, will finish at {self.completion_timestamp}",
             "purple",
         )
+
+    def duration_left(self, current_time: pd.Timestamp) -> float:
+        """Get the remaining duration of the task."""
+        if self.status != Status.IN_PROGRESS:
+            raise ValueError("Task must be in progress to check duration left.")
+        if self.completion_timestamp is None:
+            raise ValueError(
+                "Task must have a completion timestamp to check duration left."
+            )
+
+        return (self.completion_timestamp - current_time).total_seconds()
 
     def _handle_completion(self, timestamp: pd.Timestamp) -> None:
         """Handle task completion."""
@@ -322,11 +333,10 @@ class ResourceAgent:
         """Check if the agent is currently busy."""
         return self.busy_until is not None or self.current_case is not None
 
-    @property
-    def task_duration(self) -> Optional[float]:
+    def task_duration(self, time: pd.Timestamp) -> Optional[float]:
         """Get the duration of the task the agent is currently working on."""
         if self.current_case is None or self.current_case.current_task is None:
             return -1
         if self.current_case.current_task.duration is not None:
-            return self.current_case.current_task.duration
+            return self.current_case.current_task.duration_left(time)
         return -1

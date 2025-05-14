@@ -1,5 +1,4 @@
 from functools import partial
-from collections import defaultdict
 import pandas as pd  # type: ignore
 import os
 

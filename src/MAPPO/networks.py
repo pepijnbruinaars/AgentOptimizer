@@ -85,7 +85,7 @@ class CriticNetwork(nn.Module):
 
         # Total input size = single agent obs size * number of agents
         input_size = single_agent_obs_size * n_agents
-
+        print("INPUT SIZE:", input_size)
         # Network layers
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)

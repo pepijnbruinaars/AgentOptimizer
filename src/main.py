@@ -89,12 +89,12 @@ def main(args):
     """Main function to run the environment with MAPPO."""
     # Load and preprocess data
     data = load_data(config)
-    train, test = split_data(data, split=0.8)
+    preprocessed_data = remove_short_cases(data)
+    train, test = split_data(preprocessed_data, split=0.8)
 
     simulation_parameters = SimulationParameters(
         {"start_timestamp": data["start_timestamp"].min()}
     )
-    preprocessed_data = remove_short_cases(data)
 
     # Create environment
     env = AgentOptimizerEnvironment(
