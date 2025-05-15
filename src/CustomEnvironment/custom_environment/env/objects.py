@@ -297,7 +297,10 @@ class ResourceAgent:
     """Represents an agent that can work on cases and tasks."""
 
     def __init__(
-        self, resource_id: int, capabilities: dict[int, Callable[[], float] | None]
+        self,
+        resource_id: int,
+        capabilities: dict[int, Callable[[], float] | None],
+        stats_dict: dict[str, dict[str, float]],
     ) -> None:
         self.id: int = resource_id
         self.case_queue: Queue["Case"] = Queue()
@@ -305,6 +308,7 @@ class ResourceAgent:
         self.busy_until: Optional[pd.Timestamp] = None
         # The distributions of each the agent's efficiency for each task
         self.capabilities: dict[int, Callable[[], float] | None] = capabilities
+        self.stats_dict: dict[str, dict[str, float]] = stats_dict
 
     def __repr__(self) -> str:
         status = "busy" if self.is_busy() else "available"

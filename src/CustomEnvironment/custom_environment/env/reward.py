@@ -1,25 +1,4 @@
 # Can't import CustomEnvironment because it causes circular import issues, but the selfs are of that type
-from .objects import Case
-
-
-def _get_agent_active_cases_penalty(self, agent: int) -> float:
-    """Gets a penalty for the number of active cases for an agent.
-
-    Args:
-        self (CustomEnvironment): The environment object
-        agent (int): The agent ID
-
-    Returns:
-        float: The penalty score to be applied to the reward. This is a negative value.
-    """
-    current_case = self.agents[agent].current_case
-    case_queue: list[Case] = self.agents[agent].case_queue
-    active_cases = len([case for case in case_queue if not case.is_completed])
-    if current_case is not None:
-        active_cases += 1
-
-    # Calculate the penalty based on the number of active cases
-    return -0.1 * active_cases**2
 
 
 def get_reward(self) -> float:

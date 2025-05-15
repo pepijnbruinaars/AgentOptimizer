@@ -14,6 +14,7 @@ class MAPPOTrainer:
         save_freq=50_000,
         log_freq=1_000,
         eval_episodes=3,
+        should_eval=True,
     ):
         self.env = env
         self.agent = mappo_agent
@@ -21,6 +22,7 @@ class MAPPOTrainer:
         self.eval_freq = eval_freq
         self.save_freq = save_freq
         self.log_freq = log_freq
+        self.should_eval = should_eval
         self.eval_episodes = eval_episodes
 
         # Create directories for saving models and logs
@@ -45,8 +47,8 @@ class MAPPOTrainer:
         episode_reward = 0
         episode_length = 0
 
-        start_time = time.time()
-
+        start_time = time.perf_counter()
+        episode_time = time.perf_counter()
         while self.timesteps_done < self.total_timesteps:
             # Select actions using the current policy
             actions, action_probs = self.agent.select_actions(obs)
@@ -74,12 +76,17 @@ class MAPPOTrainer:
             obs = next_obs
             self.timesteps_done += 1
 
-            # if self.timesteps_done % self.log_freq == 0:
-            #     print(f"Timestep {self.timesteps_done}/{self.total_timesteps} | "
-            #           f"Episode Reward: {episode_reward:.2f} | "
-            #           f"Episode Length: {episode_length} | "
-            #           f"Value: {value:.2f}")
-            print(self.timesteps_done)
+            if self.timesteps_done % self.log_freq == 0:
+                # Log performance
+                episode_time = time.perf_counter() - episode_time
+                print(
+                    f"Timestep {self.timesteps_done}/{self.total_timesteps} | "
+                    f"Episode Reward: {episode_reward:.2f} | "
+                    f"Episode Length: {episode_length} | "
+                    f"Value: {value:.2f} | "
+                    f"Time for episode: {episode_time:.2f} seconds"
+                )
+                episode_time = time.perf_counter()
 
             # Check if episode is done
             if done:
@@ -108,7 +115,7 @@ class MAPPOTrainer:
                     )
 
             # Periodic evaluation
-            if self.timesteps_done % self.eval_freq == 0:
+            if self.should_eval and self.timesteps_done % self.eval_freq == 0:
                 eval_reward = self.evaluate()
                 print(
                     f"Evaluation at timestep {self.timesteps_done}: {eval_reward:.2f}"
@@ -132,7 +139,7 @@ class MAPPOTrainer:
         print(
             f"Training completed after {self.episodes_done} episodes and {self.timesteps_done} timesteps."
         )
-        print(f"Total time: {(time.time() - start_time) / 60:.2f} minutes")
+        print(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes")
 
     def evaluate(self, deterministic=True):
         """Evaluate the current policy."""

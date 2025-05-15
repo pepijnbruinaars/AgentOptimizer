@@ -40,7 +40,7 @@ COLOR_PRESETS: dict[ColorPreset, RGBColor] = {
 }
 
 
-def print_colored(text: str, color: Union[ColorPreset, RGBColor]) -> None:
+def print_colored(text: str, color: Union[ColorPreset, RGBColor] = "green") -> None:
     """Print text in a specific color.
 
     Args:

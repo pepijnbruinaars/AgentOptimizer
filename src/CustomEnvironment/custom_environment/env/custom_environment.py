@@ -45,6 +45,9 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.task_dict: dict[str, int] = {
             task: i for i, task in enumerate(sorted(set(self.data["activity_name"])))
         }
+        self.inv_task_dict: dict[int, str] = {
+            i: task for i, task in enumerate(sorted(set(self.data["activity_name"])))
+        }
         self.current_time: pd.Timestamp = simulation_parameters["start_timestamp"]
         self.future_cases: list[Case] = self._initialize_future_cases()
         self.pending_cases: list[Case] = []
@@ -56,8 +59,8 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.resource_dict: dict[str, int] = {
             resource: i for i, resource in enumerate(self.resources)
         }
-        activity_durations_dict = compute_activity_duration_distribution_per_agent(
-            self.data
+        activity_durations_dict, stats_dict = (
+            compute_activity_duration_distribution_per_agent(self.data)
         )
         transformed_activity_durations_dict = {
             self.resource_dict[resource]: {
@@ -76,6 +79,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
                     ][task]
                     for task in sorted(set(self.data["activity_name"]))
                 },
+                stats_dict=stats_dict[resource],  # type: ignore
             )
             for resource in self.resources
         ]
@@ -275,9 +279,11 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
     def _get_observations(self, agent: ResourceAgent):
         # Fill with -1, and the keys for the capabilities
-        capable_tasks = np.zeros(self.num_activities, dtype=np.int32)
-        for task_id in agent.capabilities.keys():
-            capable_tasks[task_id] = 1
+        task_id = (
+            self.upcoming_case.current_task.id
+            if self.upcoming_case and self.upcoming_case.current_task
+            else -1
+        )
 
         task_queue = np.zeros(MAX_TASKS_PER_AGENT, dtype=np.int32)
 
@@ -285,17 +291,26 @@ class AgentOptimizerEnvironment(ParallelEnv):
             case = agent.case_queue.peek(i)
             if case:
                 task_queue[i] = case.id
-
+        agent_can_perform_task = (
+            task_id in agent.capabilities.keys()
+            and agent.capabilities[task_id] is not None
+        )
+        # Lookup value from task dict which goes from str to int
+        task_name = None
+        if task_id > -1:
+            task_name = self.inv_task_dict[task_id]
         return {
-            "task_id": (
-                self.upcoming_case.current_task.id
-                if self.upcoming_case and self.upcoming_case.current_task
+            "task_id": task_id,
+            "task_duration_left": agent.task_duration(self.current_time),
+            "agents_task_queue": task_queue,
+            "upcoming_task_mean": (
+                agent.stats_dict[task_name]["mean"]
+                if task_name is not None and agent_can_perform_task
                 else -1
             ),
-            "agent_id": agent.id,
-            "task_duration": agent.task_duration(self.current_time),
-            "agents_capable_tasks": capable_tasks,
-            "agents_task_queue": task_queue,
+            "agent_is_capable_of_upcoming_task": np.array(
+                [int(agent_can_perform_task)], dtype=np.int8
+            ),
             "agent_is_busy": np.array([agent.is_busy()], dtype=np.int8),
         }
 
@@ -324,19 +339,38 @@ class AgentOptimizerEnvironment(ParallelEnv):
         return GymDict(
             {
                 "task_id": Discrete(self.num_activities),
-                "task_duration": Box(low=0, high=np.inf, shape=(), dtype=np.int64),
-                "agents_capable_tasks": Box(
-                    0,
-                    self.num_activities - 1,
-                    shape=(self.num_activities,),
-                    dtype=np.int32,
-                ),
+                "task_duration_left": Box(low=0, high=np.inf, shape=(), dtype=np.int64),
                 "agents_task_queue": Box(
                     0,
                     self.num_activities - 1,
                     shape=(MAX_TASKS_PER_AGENT,),
                     dtype=np.int32,
                 ),
+                "upcoming_task_mean": Box(
+                    0,
+                    np.inf,
+                    shape=(),
+                    dtype=np.float64,
+                ),
+                # "upcoming_task_std": Box(
+                #     0,
+                #     np.inf,
+                #     shape=(),
+                #     dtype=np.float64,
+                # ),
+                # "upcoming_task_min": Box(
+                #     0,
+                #     np.inf,
+                #     shape=(),
+                #     dtype=np.float64,
+                # ),
+                # "upcoming_task_max": Box(
+                #     0,
+                #     np.inf,
+                #     shape=(),
+                #     dtype=np.float64,
+                # ),
+                "agent_is_capable_of_upcoming_task": MultiBinary(1),
                 "agent_is_busy": MultiBinary(1),
             }
         )

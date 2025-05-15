@@ -39,6 +39,7 @@ def train_mappo(env, training_steps=100000):
         save_freq=20000,
         log_freq=1000,
         eval_episodes=1,
+        should_eval=False,
     )
 
     # Start training
@@ -57,8 +58,8 @@ def evaluate_agent(env, agent, episodes=10):
         episode_reward = 0
         done = False
 
+        print("Starting evaluation")
         print_colored(f"Episode {ep+1}/{episodes}", "blue")
-
         while not done:
             # Select actions using the policy
             actions, _ = agent.select_actions(observations, deterministic=True)
@@ -97,12 +98,13 @@ def main(args):
     )
 
     # Create environment
-    env = AgentOptimizerEnvironment(
-        preprocessed_data,
-        simulation_parameters,
-    )
 
     if args.mode == "train":
+        env = AgentOptimizerEnvironment(
+            train,
+            simulation_parameters,
+        )
+
         # Train MAPPO agent
         agent = train_mappo(env, training_steps=args.steps)
 
@@ -112,7 +114,15 @@ def main(args):
         # Evaluate the trained agent
         evaluate_agent(env, agent, episodes=5)
 
+        # Close the environment
+        env.close()
+
     elif args.mode == "evaluate":
+        env = AgentOptimizerEnvironment(
+            test,
+            simulation_parameters,
+        )
+
         # Load trained agent
         agent = MAPPOAgent(env)
         agent.load_models(args.model_path)
@@ -120,7 +130,14 @@ def main(args):
         # Evaluate the agent
         evaluate_agent(env, agent, episodes=args.episodes)
 
+        # Close the environment
+        env.close()
+
     elif args.mode == "random":
+        env = AgentOptimizerEnvironment(
+            train,
+            simulation_parameters,
+        )
         # Run with random actions for baseline comparison
         i = 0
         start_time = time.perf_counter()
@@ -150,8 +167,8 @@ def main(args):
             elapsed_time = end_time - start_time
             print_colored(f"\nElapsed time: {elapsed_time:.2f} seconds", "green")
 
-    # Close the environment
-    env.close()
+        # Close the environment
+        env.close()
 
 
 if __name__ == "__main__":

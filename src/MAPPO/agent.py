@@ -4,6 +4,8 @@ import numpy as np
 from collections import deque
 import os
 
+from display import print_colored
+
 
 from .networks import ActorNetwork, CriticNetwork
 
@@ -130,7 +132,9 @@ class MAPPOAgent:
         # Skip if not enough data
         if len(self.buffer["obs"]) < self.batch_size:
             return
-        print("here")
+
+        print_colored("Updating policy...", "yellow")
+
         # Compute advantages and returns
         self.compute_advantages_and_returns()
 
@@ -149,7 +153,8 @@ class MAPPOAgent:
         returns_tensor = torch.FloatTensor(returns)
 
         # Perform multiple epochs of updates
-        for _ in range(self.num_epochs):
+        for i in range(self.num_epochs):
+            print(f"Epoch {i + 1}/{self.num_epochs}")
             # Sample mini-batches
             indices = np.random.permutation(len(observations))
 
@@ -180,16 +185,16 @@ class MAPPOAgent:
                 for agent_id in self.actors:
                     actor = self.actors[agent_id]
                     optimizer = self.actor_optimizers[agent_id]
-                    print("updating actor", agent_id)
+                    # print("updating actor", agent_id)
                     for i, obs_dict in enumerate(batch_obs):
-                        print(
-                            "updating actor",
-                            agent_id,
-                            "for batch",
-                            i,
-                            "of",
-                            len(batch_obs),
-                        )
+                        # print(
+                        #     "updating actor",
+                        #     agent_id,
+                        #     "for batch",
+                        #     i,
+                        #     "of",
+                        #     len(batch_obs),
+                        # )
                         if agent_id in obs_dict:
                             obs = obs_dict[agent_id]
                             action = batch_actions[i][agent_id]
