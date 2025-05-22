@@ -3,13 +3,38 @@ import os
 import time
 from datetime import datetime
 
+from .agent import MAPPOAgent
+
+
+def map_actions_to_array(actions: dict[int, int]) -> np.ndarray:
+    """Maps the actions output dict to an array with the nth key mapped to the nth index."""
+    array = np.zeros(len(actions))
+
+    for i, key in enumerate(actions.keys()):
+        array[i] = np.array(actions[key])
+
+    return array
+
+
+def map_action_probs_to_array(
+    action_probs: dict[int, np.ndarray],
+) -> np.ndarray:
+    """Maps the action probabilities output dict to an array with the nth key mapped to the nth index. This is a 3D matrix"""
+    array = np.zeros((len(action_probs), len(action_probs[0])))
+
+    for i, key in enumerate(action_probs.keys()):
+        array[i] = np.array(np.array(action_probs[key]))
+
+    return array
+
 
 class MAPPOTrainer:
     def __init__(
         self,
         env,
-        mappo_agent,
+        mappo_agent: MAPPOAgent,
         total_timesteps=1_000_000,
+        total_episodes=20,
         eval_freq=10_000,
         save_freq=50_000,
         log_freq=1_000,
@@ -24,6 +49,7 @@ class MAPPOTrainer:
         self.log_freq = log_freq
         self.should_eval = should_eval
         self.eval_episodes = eval_episodes
+        self.total_episodes = total_episodes
 
         # Create directories for saving models and logs
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -36,10 +62,10 @@ class MAPPOTrainer:
         self.best_eval_reward = -float("inf")
 
         # Tracking metrics
-        self.episode_rewards = []
-        self.episode_lengths = []
+        self.episode_rewards: list[float] = []
+        self.episode_lengths: list[int] = []
 
-    def train(self):
+    def train(self) -> None:
         """Main training loop for MAPPO."""
         print(f"Starting MAPPO training for {self.total_timesteps} timesteps...")
 
@@ -49,9 +75,22 @@ class MAPPOTrainer:
 
         start_time = time.perf_counter()
         episode_time = time.perf_counter()
-        while self.timesteps_done < self.total_timesteps:
+
+        # Array containing the ids of the actions taken by the agents
+        # Of shape n (steps) x m (agents)
+        episode_actions: list[np.ndarray] = []
+        # Array containg the probabilities of the actions for each agent at each step
+        # Shape: n (steps) x m (agents) x k (probabilities)
+        episode_action_probs: list[np.ndarray] = []
+
+        while (
+            self.episodes_done < self.total_episodes
+            and self.timesteps_done < self.total_timesteps
+        ):
             # Select actions using the current policy
             actions, action_probs = self.agent.select_actions(obs)
+            episode_actions.append(map_actions_to_array(actions))
+            episode_action_probs.append(map_action_probs_to_array(action_probs))
 
             # Get state value
             value = self.agent.compute_values(obs)
@@ -103,6 +142,19 @@ class MAPPOTrainer:
                 # Reset episode metrics
                 episode_reward = 0
                 episode_length = 0
+                # Save episode actions and action probabilities to csv
+                np.savetxt(
+                    f"{self.save_dir}/episode_{self.episodes_done}_actions.csv",
+                    episode_actions,
+                    delimiter=";",
+                )
+                np.savetxt(
+                    f"{self.save_dir}/episode_{self.episodes_done}_action_probs.csv",
+                    episode_action_probs,
+                    delimiter=";",
+                )
+                episode_actions = []
+                episode_action_probs = []
                 self.episodes_done += 1
 
                 # Logging

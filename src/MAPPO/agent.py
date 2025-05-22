@@ -21,7 +21,7 @@ class MAPPOAgent:
         gae_lambda=0.95,
         clip_param=0.2,
         batch_size=64,
-        num_epochs=10,
+        num_epochs=5,
         buffer_size=2048,
     ):
         self.env = env

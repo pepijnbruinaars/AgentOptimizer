@@ -28,7 +28,7 @@ def get_reward(self) -> float:
     if len(self.future_cases) > 0 or len(self.pending_cases) > 0:
         reward -= 0.5
 
-    if len(self.pending_cases) < 0 and len(self.future_cases) < 0:
-        reward += 100
+    if len(self.pending_cases) == 0 and len(self.future_cases) == 0:
+        reward = 100
 
     return reward

@@ -1,3 +1,4 @@
+import os
 from gymnasium.spaces import Discrete, MultiBinary, Box, Dict as GymDict
 from pettingzoo import ParallelEnv  # type: ignore
 import numpy as np
@@ -31,8 +32,14 @@ class AgentOptimizerEnvironment(ParallelEnv):
     ) -> None:
         super().__init__()
         print("Initializing environment...")
-        # Store the data
         self.data: pd.DataFrame = data
+        self.log_dir: str = "data/logs"
+
+        # check that log_dir exists
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+        current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file: str = os.path.join(self.log_dir, f"log_{current_timestamp}.txt")
 
         # Total number of steps and epochs
         self.steps: int = 0
@@ -117,32 +124,26 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
     def _filter_completed_cases(self) -> None:
         """Filter out completed cases from pending_cases and move them to completed_cases."""
-        completed = []
-        remaining = []
-
-        for case in self.pending_cases:
+        i = 0
+        while i < len(self.pending_cases):
+            case = self.pending_cases[i]
             if case.status == Status.COMPLETED:
-                completed.append(case)
+                self.completed_cases.append(case)
+                self.pending_cases.pop(i)
             else:
-                remaining.append(case)
-        debug_print_colored(f"Completed: {len(completed)}, remaining: {len(remaining)}")
-        debug_print_colored(
-            f"Remaining case: {remaining[0]}" if remaining else "No remaining cases"
-        )
-        # Update the lists
-        self.completed_cases.extend(completed)
-        self.pending_cases = remaining
+                i += 1
 
-        if completed:
-            debug_print_colored(
-                f"Moved {len(completed)} completed cases to completed_cases list",
-                "green",
-            )
+        debug_print_colored(
+            f"Completed: {len(self.completed_cases)}, remaining: {len(self.pending_cases)}"
+        )
+        if self.pending_cases:
+            debug_print_colored(f"Remaining case: {self.pending_cases[0]}")
+        else:
+            debug_print_colored("No remaining cases")
 
     def step(self, actions: dict[int, int]) -> tuple[dict, dict, dict, dict, dict]:
         """Execute one step of the environment's dynamics."""
         self.steps += 1
-        self._filter_completed_cases()
 
         ### -------------------------------- ###
         ### HANDLE ACTION FROM CURRENT STEP  ###
@@ -203,7 +204,42 @@ class AgentOptimizerEnvironment(ParallelEnv):
         for agent in self.agents:
             debug_print_colored(agent, "yellow")
         for agent in self.agents:
-            agent.work_case(self.current_time)
+            is_finished, finished_case = agent.work_case(self.current_time)
+            if is_finished and finished_case:
+                # If the case is finished, add all its tasks to the CSV
+                for task in finished_case.all_tasks:
+                    finished_case_df = pd.DataFrame(
+                        columns=[
+                            "case_id",
+                            "case_nr_tasks",
+                            "case_open_time",
+                            "case_completed_time",
+                            "task_id",
+                            "task_assigned_time",
+                            "task_started_time",
+                            "task_completed_time",
+                            "task_agent_id",
+                        ],
+                        data=[
+                            [
+                                finished_case.id,
+                                len(finished_case.all_tasks),
+                                finished_case.assigned_timestamp,
+                                finished_case.completion_timestamp,
+                                task.id,
+                                task.assigned_timestamp,
+                                task.start_timestamp,
+                                task.completion_timestamp,
+                                task.assigned_agent.id,
+                            ]
+                        ],
+                    )
+                    finished_case_df.to_csv(
+                        self.log_file,
+                        mode="a",
+                        header=not os.path.exists(self.log_file),
+                        index=False,
+                    )
             if agent.busy_until and agent.busy_until <= self.current_time:
                 agent.busy_until = None
 

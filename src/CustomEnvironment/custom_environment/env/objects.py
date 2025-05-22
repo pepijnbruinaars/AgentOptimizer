@@ -227,9 +227,6 @@ class Case:
         if self.assigned_agent:
             self.assigned_agent.current_case = None
             self.assigned_agent = None
-        if self.current_task and self.current_task.assigned_agent:
-            self.current_task.assigned_agent.current_case = None
-            self.current_task.assigned_agent = None
 
     def _complete_task(self, timestamp: pd.Timestamp) -> None:
         """Complete the current task and update the case status."""
