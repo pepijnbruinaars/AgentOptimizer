@@ -1,6 +1,8 @@
 import time
 import argparse
 import numpy as np
+import os
+from datetime import datetime
 
 from CustomEnvironment.custom_environment import AgentOptimizerEnvironment
 from CustomEnvironment.custom_environment.env.custom_environment import (
@@ -17,7 +19,7 @@ from preprocessing.preprocessing import remove_short_cases
 import env_config
 
 
-def train_mappo(env, training_steps=100000):
+def train_mappo(env, experiment_dir: str, training_steps=100000):
     """Train a MAPPO agent on the environment."""
     # Initialize MAPPO agent
     mappo_agent = MAPPOAgent(
@@ -34,12 +36,9 @@ def train_mappo(env, training_steps=100000):
     trainer = MAPPOTrainer(
         env,
         mappo_agent,
-        total_timesteps=training_steps,
-        eval_freq=5000,
-        save_freq=20000,
-        log_freq=1000,
-        eval_episodes=1,
-        should_eval=False,
+        total_epochs=20,
+        should_eval=True,  # Enable evaluation
+        experiment_dir=experiment_dir,  # Pass experiment directory
     )
 
     # Start training
@@ -77,6 +76,8 @@ def evaluate_agent(env, agent, episodes=10):
             if env_config.DEBUG:
                 env.render()
 
+        env.reset()
+
         total_rewards.append(episode_reward)
         print_colored(f"Episode {ep+1} reward: {episode_reward:.2f}", "green")
 
@@ -86,89 +87,45 @@ def evaluate_agent(env, agent, episodes=10):
     return avg_reward
 
 
-def main(args):
-    """Main function to run the environment with MAPPO."""
+def main():
+    """Main function to run the environment."""
     # Load and preprocess data
     data = load_data(config)
-    preprocessed_data = remove_short_cases(data)
-    train, test = split_data(preprocessed_data, split=0.8)
+    data = remove_short_cases(data)
+    train, test = split_data(data)
 
     simulation_parameters = SimulationParameters(
         {"start_timestamp": data["start_timestamp"].min()}
     )
 
-    # Create environment
+    # Create timestamped directory for this experiment
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_dir = f"./experiments/mappo_{timestamp}"
+    os.makedirs(experiment_dir, exist_ok=True)
 
-    if args.mode == "train":
-        env = AgentOptimizerEnvironment(
-            train,
-            simulation_parameters,
-        )
+    # Initialize environment
+    env = AgentOptimizerEnvironment(
+        train,
+        simulation_parameters,
+        experiment_dir=experiment_dir,  # Pass experiment directory
+    )
 
-        # Train MAPPO agent
-        agent = train_mappo(env, training_steps=args.steps)
+    # Train MAPPO agent
+    agent = train_mappo(env, experiment_dir)
 
-        # Save the trained agent
-        agent.save_models("./models/mappo_final")
+    # Save the trained agent
+    agent.save_models(os.path.join(experiment_dir, "mappo_agent.pth"))
 
-        # Evaluate the trained agent
-        evaluate_agent(env, agent, episodes=5)
+    # Test the agent
+    test_env = AgentOptimizerEnvironment(
+        test,
+        simulation_parameters,
+        experiment_dir=experiment_dir,  # Pass experiment directory
+    )
 
-        # Close the environment
-        env.close()
-
-    elif args.mode == "evaluate":
-        env = AgentOptimizerEnvironment(
-            test,
-            simulation_parameters,
-        )
-
-        # Load trained agent
-        agent = MAPPOAgent(env)
-        agent.load_models(args.model_path)
-
-        # Evaluate the agent
-        evaluate_agent(env, agent, episodes=args.episodes)
-
-        # Close the environment
-        env.close()
-
-    elif args.mode == "random":
-        env = AgentOptimizerEnvironment(
-            train,
-            simulation_parameters,
-        )
-        # Run with random actions for baseline comparison
-        i = 0
-        start_time = time.perf_counter()
-        try:
-            observations, _ = env.reset()
-            while True:
-                # Random action selection
-                env_config.debug_print_colored(
-                    f"Step {i}, time: {env.current_time.time()}", "blue"
-                )
-                actions = {agent.id: np.random.choice([0, 1]) for agent in env.agents}
-                observations, rewards, terminations, truncations, _ = env.step(actions)
-
-                if any(terminations.values()):
-                    print("Episode finished.")
-                    break
-                if any(truncations.values()):
-                    print("Episode truncated.")
-                    break
-
-                i += 1
-
-                if env_config.DEBUG:
-                    env.render()
-        finally:
-            end_time = time.perf_counter()
-            elapsed_time = end_time - start_time
-            print_colored(f"\nElapsed time: {elapsed_time:.2f} seconds", "green")
-
-        # Close the environment
-        env.close()
+    # Close the environment
+    env.close()
+    test_env.close()
 
 
 if __name__ == "__main__":
@@ -208,4 +165,4 @@ if __name__ == "__main__":
     if env_config.DEBUG:
         env_config.debug_print_colored("Debugging mode is enabled.", "green")
 
-    main(args)
+    main()

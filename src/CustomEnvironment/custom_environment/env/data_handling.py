@@ -90,6 +90,7 @@ def compute_activity_duration_distribution_per_agent(data: pd.DataFrame):
 
                 # Calculate mean, std, min, and max
                 mean = float(np.mean(duration_list))
+                median = float(np.median(duration_list))
                 std = float(np.std(duration_list))
                 min = float(np.min(duration_list))
                 max = float(np.max(duration_list))
@@ -101,6 +102,7 @@ def compute_activity_duration_distribution_per_agent(data: pd.DataFrame):
                 ] = duration_distribution
                 stats_dict[agent][act] = {
                     "mean": mean,
+                    "median": median,
                     "std": std,
                     "min": min,
                     "max": max,

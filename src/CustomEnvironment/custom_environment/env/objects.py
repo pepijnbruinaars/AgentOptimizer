@@ -31,6 +31,7 @@ class Task:
         self.assigned_timestamp: Optional[pd.Timestamp] = None
         self.start_timestamp: Optional[pd.Timestamp] = None
         self.completion_timestamp: Optional[pd.Timestamp] = None
+        self.environment = None  # Will be set when task is assigned to an agent
 
     def __repr__(self) -> str:
         return f"Task(ID: {self.id}, case: {self.case_id}, status: {self.status.value})"
@@ -40,6 +41,11 @@ class Task:
         self.assigned_agent = agent
         self.assigned_timestamp = timestamp
         self.status = Status.OPEN
+        # Get reference to environment through the agent
+        if agent.current_case:
+            self.environment = agent.current_case.environment
+        if agent.case_queue.size() > 0:
+            self.environment = agent.case_queue.peek(0).environment
 
     def _start(self, timestamp: pd.Timestamp, duration: float) -> None:
         """Start working on this task."""
@@ -79,6 +85,9 @@ class Task:
         self.status = Status.COMPLETED
         if self.assigned_agent:
             self.assigned_agent.busy_until = None
+            # Set the completed task in the environment
+            if self.environment:
+                self.environment.completed_task = self
 
         debug_print_colored(f"Task {self.format()} completed at {timestamp}", "green")
 
@@ -118,6 +127,7 @@ class Case:
         self.start_timestamp: Optional[pd.Timestamp] = None
         self.completion_timestamp: Optional[pd.Timestamp] = None
         self.status: Status = Status.PENDING
+        self.environment = None  # Will be set when case is added to environment
 
         # Task management
         self.all_tasks: List[Task] = tasks
@@ -164,6 +174,12 @@ class Case:
         self.assigned_agent = agent
         self.assigned_timestamp = timestamp
         self.status = Status.OPEN
+        # Get reference to environment through the agent
+        if agent.current_case:
+            self.environment = agent.current_case.environment
+        if agent.case_queue.size() > 0:
+            self.environment = agent.case_queue.peek(0).environment
+
         if agent.current_case is None:
             debug_print_colored(
                 f"Case {self.id} assigned to agent {agent.id} (current case)", "green"

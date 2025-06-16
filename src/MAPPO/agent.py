@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.optim as optim
 import numpy as np
@@ -37,12 +38,18 @@ class MAPPOAgent:
         for agent in env.agents:
             obs_space = env.observation_space(agent.id)
             action_space = env.action_space(agent.id)
-            self.actors[agent.id] = ActorNetwork(obs_space, action_space, hidden_size)
+            self.actors[agent.id] = ActorNetwork(
+                obs_space, 
+                action_space, 
+                hidden_size=hidden_size
+            )
 
         # Create centralized critic
         first_agent = env.agents[0]
         self.critic = CriticNetwork(
-            env.observation_space(first_agent.id), self.n_agents, hidden_size
+            env.observation_space(first_agent.id), 
+            self.n_agents, 
+            hidden_size=hidden_size
         )
 
         # Setup optimizers
@@ -74,7 +81,9 @@ class MAPPOAgent:
 
         for agent_id, obs in observations.items():
             if agent_id in self.actors:
-                action, probs = self.actors[agent_id].act(obs, deterministic)
+                # Get the reward for this agent from the last step
+                reward = self.buffer["rewards"][-1] if self.buffer["rewards"] else None
+                action, probs = self.actors[agent_id].act(obs, reward, deterministic)
                 actions[agent_id] = action
                 action_probs[agent_id] = probs
 
@@ -84,7 +93,9 @@ class MAPPOAgent:
         """Compute values for the current observations using the critic network."""
         # Convert observations dict to list in agent order
         obs_list = [observations[agent.id] for agent in self.env.agents]
-        value = self.critic(obs_list).item()
+        # Get the reward from the last step
+        reward = self.buffer["rewards"][-1] if self.buffer["rewards"] else None
+        value = self.critic(obs_list, reward).item()
         return value
 
     def store_experience(self, obs, actions, action_probs, rewards, dones, values):
@@ -95,6 +106,12 @@ class MAPPOAgent:
         self.buffer["rewards"].append(rewards)
         self.buffer["dones"].append(dones)
         self.buffer["values"].append(values)
+
+    def reset_history(self):
+        """Reset the history buffers for all networks."""
+        for actor in self.actors.values():
+            actor.reset_history()
+        self.critic.reset_history()
 
     def compute_advantages_and_returns(self):
         """Compute GAE advantages and returns for stored trajectories."""
@@ -152,9 +169,13 @@ class MAPPOAgent:
         advantages_tensor = torch.FloatTensor(advantages)
         returns_tensor = torch.FloatTensor(returns)
 
+        # Reset history before batch processing
+        self.reset_history()
+
         # Perform multiple epochs of updates
         for i in range(self.num_epochs):
             print(f"Epoch {i + 1}/{self.num_epochs}")
+            start_time = time.perf_counter()
             # Sample mini-batches
             indices = np.random.permutation(len(observations))
 
@@ -170,10 +191,11 @@ class MAPPOAgent:
                 batch_returns = returns_tensor[batch_indices]
 
                 # Update critics (centralized)
-                for i, obs_dict in enumerate(batch_obs):
+                for j, obs_dict in enumerate(batch_obs):
                     obs_list = [obs_dict[agent.id] for agent in self.env.agents]
-                    value_pred = self.critic(obs_list)
-                    value_target = batch_returns[i]
+                    reward = self.buffer["rewards"][batch_indices[j]]
+                    value_pred = self.critic(obs_list, reward)
+                    value_target = batch_returns[j]
 
                     critic_loss = ((value_pred - value_target) ** 2).mean()
 
@@ -185,24 +207,17 @@ class MAPPOAgent:
                 for agent_id in self.actors:
                     actor = self.actors[agent_id]
                     optimizer = self.actor_optimizers[agent_id]
-                    # print("updating actor", agent_id)
-                    for i, obs_dict in enumerate(batch_obs):
-                        # print(
-                        #     "updating actor",
-                        #     agent_id,
-                        #     "for batch",
-                        #     i,
-                        #     "of",
-                        #     len(batch_obs),
-                        # )
+                    for j, obs_dict in enumerate(batch_obs):
                         if agent_id in obs_dict:
                             obs = obs_dict[agent_id]
-                            action = batch_actions[i][agent_id]
-                            old_action_prob = batch_old_probs[i][agent_id][action]
-                            advantage = batch_advantages[i]
+                            action = batch_actions[j][agent_id]
+                            # Get the action probability for the taken action
+                            old_action_prob = batch_old_probs[j][agent_id][action]
+                            advantage = batch_advantages[j]
+                            reward = self.buffer["rewards"][batch_indices[j]]
 
                             # Get current action probabilities
-                            current_probs = actor(obs)
+                            current_probs = actor(obs, reward)
                             current_action_prob = current_probs[action]
 
                             # Compute ratio
@@ -217,14 +232,16 @@ class MAPPOAgent:
                                 * advantage
                             )
 
-                            # Actor loss
-                            actor_loss = -torch.min(surrogate1, surrogate2)
+                            # Actor loss - take mean to ensure scalar output
+                            actor_loss = -torch.min(surrogate1, surrogate2).mean()
 
                             # Update actor
                             optimizer.zero_grad()
                             actor_loss.backward()
                             optimizer.step()
 
+            end_time = time.perf_counter()
+            print(f"Epoch {i + 1}/{self.num_epochs} took {end_time - start_time:.2f} seconds")
         # Clear the buffer after updating
         self.buffer = {
             "obs": [],

@@ -28,18 +28,23 @@ class AgentOptimizerEnvironment(ParallelEnv):
     }
 
     def __init__(
-        self, data: pd.DataFrame, simulation_parameters: SimulationParameters
+        self, data: pd.DataFrame, simulation_parameters: SimulationParameters, experiment_dir: str | None = None
     ) -> None:
         super().__init__()
         print("Initializing environment...")
         self.data: pd.DataFrame = data
-        self.log_dir: str = "data/logs"
-
+        
+        # Set up logging directory
+        if experiment_dir:
+            self.log_dir = os.path.join(experiment_dir, "logs")
+        else:
+            self.log_dir = "data/logs"
+            
         # check that log_dir exists
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
         current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file: str = os.path.join(self.log_dir, f"log_{current_timestamp}.txt")
+        self.log_file: str = os.path.join(self.log_dir, f"log_{current_timestamp}.csv")
 
         # Total number of steps and epochs
         self.steps: int = 0
@@ -60,6 +65,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.pending_cases: list[Case] = []
         self.completed_cases: list[Case] = []
         self.upcoming_case: Case | None = None
+        self.completed_task: Task | None = None
 
         # Initialize the agents
         self.resources: list[str] = sorted(set(self.data["resource"]))
@@ -102,6 +108,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         future_cases: list[Case] = []
         # Group the data by case_id, and iterate over each case
         grouped_and_sorted = self.data.sort_values("start_timestamp").groupby("case_id")
+        print(len(grouped_and_sorted))
         for case_id, case_data in grouped_and_sorted:
             # Start timestamp of a case is the earliest timestamp of the case
             start_timestamp = case_data["start_timestamp"].min()
@@ -115,6 +122,9 @@ class AgentOptimizerEnvironment(ParallelEnv):
                     for task in future_tasks
                 ],
             )
+            case.environment = self  # Set environment reference
+            for task in case.all_tasks:
+                task.environment = self  # Set environment reference for all tasks
 
             future_cases.append(case)
 
@@ -206,6 +216,8 @@ class AgentOptimizerEnvironment(ParallelEnv):
         for agent in self.agents:
             is_finished, finished_case = agent.work_case(self.current_time)
             if is_finished and finished_case:
+                if finished_case.current_task:
+                    self.completed_task = finished_case.current_task
                 # If the case is finished, add all its tasks to the CSV
                 for task in finished_case.all_tasks:
                     finished_case_df = pd.DataFrame(
@@ -230,7 +242,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
                                 task.assigned_timestamp,
                                 task.start_timestamp,
                                 task.completion_timestamp,
-                                task.assigned_agent.id,
+                                task.assigned_agent.id,  # type: ignore
                             ]
                         ],
                     )
@@ -344,6 +356,16 @@ class AgentOptimizerEnvironment(ParallelEnv):
                 if task_name is not None and agent_can_perform_task
                 else -1
             ),
+            "upcoming_task_median": (
+                agent.stats_dict[task_name]["median"]
+                if task_name is not None and agent_can_perform_task
+                else -1
+            ),
+            "upcoming_task_std": (
+                agent.stats_dict[task_name]["std"]
+                if task_name is not None and agent_can_perform_task
+                else -1
+            ),
             "agent_is_capable_of_upcoming_task": np.array(
                 [int(agent_can_perform_task)], dtype=np.int8
             ),
@@ -388,12 +410,18 @@ class AgentOptimizerEnvironment(ParallelEnv):
                     shape=(),
                     dtype=np.float64,
                 ),
-                # "upcoming_task_std": Box(
-                #     0,
-                #     np.inf,
-                #     shape=(),
-                #     dtype=np.float64,
-                # ),
+                "upcoming_task_median": Box(
+                    0,
+                    np.inf,
+                    shape=(),
+                    dtype=np.float64,
+                ),
+                "upcoming_task_std": Box(
+                    0,
+                    np.inf,
+                    shape=(),
+                    dtype=np.float64,
+                ),
                 # "upcoming_task_min": Box(
                 #     0,
                 #     np.inf,
@@ -420,6 +448,8 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.pending_cases = []
         self.completed_cases = []
         self.upcoming_case = None
+        current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = os.path.join(self.log_dir, f"log_{current_timestamp}.csv")
 
         observations = {
             agent.id: self._get_observations(agent) for agent in self.agents

@@ -6,7 +6,7 @@ from gymnasium import spaces
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, obs_space, action_space, hidden_size=64):
+    def __init__(self, obs_space, action_space, hidden_size=128):
         super(ActorNetwork, self).__init__()
 
         # Calculate input size from observation space
@@ -23,12 +23,17 @@ class ActorNetwork(nn.Module):
             elif isinstance(space, spaces.MultiBinary):
                 input_size += int(np.prod(space.shape))
 
+        # Add reward history to input size
+        input_size += 1  # For current reward
+        
         # Network layers
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, hidden_size)
+        # Action head for discrete action space
         self.action_head = nn.Linear(hidden_size, action_space.n)
 
-    def forward(self, obs_dict):
+    def forward(self, obs_dict, reward=None):
         # Process observation dictionary into a flat vector
         x_parts = []
 
@@ -41,18 +46,25 @@ class ActorNetwork(nn.Module):
                     # Handle scalar values or other types
                     x_parts.append(torch.FloatTensor([obs_dict[key]]))
 
+        # Add current reward to input
+        if reward is not None:
+            x_parts.append(torch.FloatTensor([reward]))
+        else:
+            x_parts.append(torch.FloatTensor([0.0]))
+
         x = torch.cat(x_parts)
 
-        # Forward pass
+        # Process through network
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
         action_probs = F.softmax(self.action_head(x), dim=-1)
 
         return action_probs
 
-    def act(self, obs, deterministic=False):
+    def act(self, obs, reward=None, deterministic=False):
         with torch.no_grad():
-            action_probs = self(obs)
+            action_probs = self(obs, reward)
 
             if deterministic:
                 action = torch.argmax(action_probs).item()
@@ -61,9 +73,13 @@ class ActorNetwork(nn.Module):
 
             return action, action_probs
 
+    def reset_history(self):
+        """Reset the reward history buffer."""
+        pass
+
 
 class CriticNetwork(nn.Module):
-    def __init__(self, obs_space, n_agents, hidden_size=64):
+    def __init__(self, obs_space, n_agents, hidden_size=256):
         super(CriticNetwork, self).__init__()
 
         # For centralized critic, we combine observations from all agents
@@ -83,15 +99,16 @@ class CriticNetwork(nn.Module):
             elif isinstance(space, spaces.MultiBinary):
                 single_agent_obs_size += int(np.prod(space.shape))
 
-        # Total input size = single agent obs size * number of agents
-        input_size = single_agent_obs_size * n_agents
-        print("INPUT SIZE:", input_size)
+        # Total input size = single agent obs size * number of agents + reward
+        input_size = single_agent_obs_size * n_agents + 1  # +1 for reward
+        
         # Network layers
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, hidden_size)
         self.value_head = nn.Linear(hidden_size, 1)
 
-    def forward(self, obs_dicts):
+    def forward(self, obs_dicts, reward=None):
         # Process and concatenate observations from all agents
         all_agent_inputs = []
 
@@ -112,10 +129,21 @@ class CriticNetwork(nn.Module):
 
         # Concatenate all agents' observations
         x = torch.cat(all_agent_inputs)
+        
+        # Add current reward to input
+        if reward is not None:
+            x = torch.cat([x, torch.FloatTensor([reward])])
+        else:
+            x = torch.cat([x, torch.FloatTensor([0.0])])
 
-        # Forward pass
+        # Process through network
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
         value = self.value_head(x)
 
         return value
+
+    def reset_history(self):
+        """Reset the reward history buffer."""
+        pass
