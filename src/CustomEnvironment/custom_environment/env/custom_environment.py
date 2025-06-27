@@ -6,12 +6,12 @@ import numpy as np
 from typing import TypedDict
 import pandas as pd
 
-from env_config import debug_print_colored
+from env_config import debug_print_colored  # type: ignore
 
 
 from .reward import get_reward
 from .objects import Case, Task, ResourceAgent, Status
-from display import display_indented_list
+from display import display_indented_list  # type: ignore
 from .data_handling import compute_activity_duration_distribution_per_agent
 from .constants import MAX_TASKS_PER_AGENT
 
@@ -28,18 +28,21 @@ class AgentOptimizerEnvironment(ParallelEnv):
     }
 
     def __init__(
-        self, data: pd.DataFrame, simulation_parameters: SimulationParameters, experiment_dir: str | None = None
+        self,
+        data: pd.DataFrame,
+        simulation_parameters: SimulationParameters,
+        experiment_dir: str | None = None,
     ) -> None:
         super().__init__()
         print("Initializing environment...")
         self.data: pd.DataFrame = data
-        
+
         # Set up logging directory
         if experiment_dir:
             self.log_dir = os.path.join(experiment_dir, "logs")
         else:
             self.log_dir = "data/logs"
-            
+
         # check that log_dir exists
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
@@ -72,12 +75,16 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.resource_dict: dict[str, int] = {
             resource: i for i, resource in enumerate(self.resources)
         }
+
+        # Fit distributions for each agent and activity
         activity_durations_dict, stats_dict = (
             compute_activity_duration_distribution_per_agent(self.data)
         )
+
+        # Transform the distributions to use task IDs instead of activity names
         transformed_activity_durations_dict = {
             self.resource_dict[resource]: {
-                task: activity_durations_dict[resource][task]
+                self.task_dict[task]: activity_durations_dict[resource][task]
                 for task in sorted(set(self.data["activity_name"]))
             }
             for resource in self.resources
@@ -86,16 +93,23 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.agents: list[ResourceAgent] = [
             ResourceAgent(
                 self.resource_dict[resource],
+                name=resource,
                 capabilities={
                     self.task_dict[task]: transformed_activity_durations_dict[
                         self.resource_dict[resource]
-                    ][task]
+                    ][self.task_dict[task]]
                     for task in sorted(set(self.data["activity_name"]))
                 },
                 stats_dict=stats_dict[resource],  # type: ignore
             )
             for resource in self.resources
         ]
+
+        # Set environment reference for all tasks and cases
+        for case in self.future_cases:
+            case.environment = self
+            for task in case.all_tasks:
+                task.environment = self
 
         print(f"Environment initialized. Start time: {self.current_time}")
         display_indented_list(self.agents, "Agents")
@@ -353,17 +367,23 @@ class AgentOptimizerEnvironment(ParallelEnv):
             "agents_task_queue": task_queue,
             "upcoming_task_mean": (
                 agent.stats_dict[task_name]["mean"]
-                if task_name is not None and agent_can_perform_task
+                if task_name is not None
+                and agent_can_perform_task
+                and agent.stats_dict[task_name] is not None
                 else -1
             ),
             "upcoming_task_median": (
                 agent.stats_dict[task_name]["median"]
-                if task_name is not None and agent_can_perform_task
+                if task_name is not None
+                and agent_can_perform_task
+                and agent.stats_dict[task_name] is not None
                 else -1
             ),
             "upcoming_task_std": (
                 agent.stats_dict[task_name]["std"]
-                if task_name is not None and agent_can_perform_task
+                if task_name is not None
+                and agent_can_perform_task
+                and agent.stats_dict[task_name] is not None
                 else -1
             ),
             "agent_is_capable_of_upcoming_task": np.array(
@@ -451,6 +471,26 @@ class AgentOptimizerEnvironment(ParallelEnv):
         current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = os.path.join(self.log_dir, f"log_{current_timestamp}.csv")
 
+        # Refit distributions for each agent and activity
+        activity_durations_dict, stats_dict = (
+            compute_activity_duration_distribution_per_agent(self.data)
+        )
+
+        # Update agent capabilities with new distributions
+        for agent in self.agents:
+            resource = self.resources[agent.id]
+            agent.capabilities = {
+                self.task_dict[task]: activity_durations_dict[resource][task]
+                for task in sorted(set(self.data["activity_name"]))
+            }
+            agent.stats_dict = stats_dict[resource]  # type: ignore
+
+        # Set environment reference for all tasks and cases
+        for case in self.future_cases:
+            case.environment = self
+            for task in case.all_tasks:
+                task.environment = self
+
         observations = {
             agent.id: self._get_observations(agent) for agent in self.agents
         }
@@ -504,5 +544,5 @@ class AgentOptimizerEnvironment(ParallelEnv):
                 return self.current_time + pd.Timedelta(seconds=1)
             return next_time
 
-        # If no events, return a fixed interval (fallback)
-        return self.current_time
+        # If no events, advance time by a fixed interval
+        return self.current_time + pd.Timedelta(seconds=1)

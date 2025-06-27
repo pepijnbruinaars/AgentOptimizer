@@ -5,7 +5,10 @@ from env_config import debug_print_colored
 
 
 def get_reward(self) -> float:
-    """Return the reward of the current state.
+    """Return the reward for the current state.
+    The reward is calculated based on the duration of the completed task, and it follows the following parabola:
+    R = -((0.04 * duration_minutes) ** 2)
+    The reward is 100 if there are no further cases being processed, and 0 if the duration is negative.
 
     Returns:
         float: Reward of the current state
@@ -40,8 +43,10 @@ def get_reward(self) -> float:
     # Calculate reward based on task duration
     duration = completed_task.completion_timestamp - completed_task.assigned_timestamp
     duration_minutes = duration.total_seconds() / 60
+
     if duration_minutes < 0:
         return 0.0
-    reward = -((0.04 * duration_minutes) ** 2)
+    
+    reward = -((duration_minutes) ** 2)
     debug_print_colored(f"Task {completed_task.format()} completed with duration {duration_minutes:.2f} minutes, reward: {reward:.2f}", "green")
     return reward

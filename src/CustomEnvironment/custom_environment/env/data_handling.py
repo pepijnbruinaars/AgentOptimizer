@@ -1,12 +1,13 @@
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple, Dict, List, Mapping
 import numpy as np
 import pandas as pd
+from .duration_distribution import DurationDistribution, get_best_fitting_distribution
 
 
 def compute_agent_activity_durations(
     data: pd.DataFrame,
-) -> dict[str, dict[str, np.ndarray]]:
+) -> dict[str, dict[str, List[float]]]:
     """Collects the activity durations for each agent in the event log.
     This function is an adaptation from the original code (_compute_activity_duration_distribution) made for the AgentSim paper.
 
@@ -18,7 +19,7 @@ def compute_agent_activity_durations(
     """
     activities = sorted(set(data["activity_name"]))
     agents = sorted(set(data["resource"]))
-    activity_durations = {key: {k: np.array([]) for k in activities} for key in agents}
+    activity_durations = {key: {k: [] for k in activities} for key in agents}
 
     for _, row in data.iterrows():
         agent = row["resource"]
@@ -30,9 +31,7 @@ def compute_agent_activity_durations(
             raise ValueError(
                 f"Invalid duration for agent {agent} and activity {activity}"
             )
-        activity_durations[agent][activity] = np.append(
-            activity_durations[agent][activity], duration
-        )
+        activity_durations[agent][activity].append(duration)
 
     return activity_durations
 
@@ -57,55 +56,66 @@ def sample_normal(mean: float, std: float, min: float, max: float) -> float:
     return value
 
 
-def compute_activity_duration_distribution_per_agent(data: pd.DataFrame):
+def compute_activity_duration_distribution_per_agent(
+    data: pd.DataFrame,
+) -> Tuple[Mapping[str, Mapping[str, Optional[DurationDistribution]]], Mapping[str, Mapping[str, Optional[Dict[str, float]]]]]:
     """
     Compute the best fitting distribution of activity durations per agent.
 
     Args:
-        df_train: Event log in pandas format
+        data: Event log in pandas format
 
     Returns:
-        dict: A dict storing for each agent the distribution for each activity.
+        Tuple containing:
+        - A dict storing for each agent the best fitting distribution for each activity
+        - A dict storing for each agent the statistics for each activity
     """
     activity_durations_dict = compute_agent_activity_durations(data)
 
     agents = activity_durations_dict.keys()
     activities = sorted(set(data["activity_name"]))
 
-    activity_duration_distribution_per_agent: dict[
-        str, dict[str, Optional[partial[float]]]
-    ] = {agent: {activity: None for activity in activities} for agent in agents}
-    stats_dict: dict[str, dict[str, Optional[dict[str, float]]]] = {
+    activity_duration_distribution_per_agent: Dict[str, Dict[str, Optional[DurationDistribution]]] = {
         agent: {activity: None for activity in activities} for agent in agents
     }
+    stats_dict: Dict[str, Dict[str, Optional[Dict[str, float]]]] = {
+        agent: {activity: None for activity in activities} for agent in agents
+    }
+
     for agent, val in activity_durations_dict.items():
         for act, duration_list in val.items():
             if len(duration_list) > 0:
-                # Return callable normal distribution
                 # Check if there are any negative values in the duration list
-                if np.any(duration_list < 0):
+                if any(d < 0 for d in duration_list):
                     raise ValueError(
                         f"Negative duration found for agent {agent} and activity {act}"
                     )
 
-                # Calculate mean, std, min, and max
+                # Calculate statistics
                 mean = float(np.mean(duration_list))
                 median = float(np.median(duration_list))
                 std = float(np.std(duration_list))
-                min = float(np.min(duration_list))
-                max = float(np.max(duration_list))
+                min_val = float(np.min(duration_list))
+                max_val = float(np.max(duration_list))
 
-                # Set the distribution function for the activity
-                duration_distribution = partial(sample_normal, mean, std, min, max)
-                activity_duration_distribution_per_agent[agent][
-                    act
-                ] = duration_distribution
+                # Store statistics
                 stats_dict[agent][act] = {
                     "mean": mean,
                     "median": median,
                     "std": std,
-                    "min": min,
-                    "max": max,
+                    "min": min_val,
+                    "max": max_val,
                 }
+
+                # Fit best distribution
+                try:
+                    best_distribution = get_best_fitting_distribution(duration_list, filter_outliers=False)
+                    activity_duration_distribution_per_agent[agent][act] = best_distribution
+                except Exception as e:
+                    print(f"Warning: Could not fit distribution for agent {agent} and activity {act}: {e}")
+                    # Fallback to normal distribution if fitting fails
+                    activity_duration_distribution_per_agent[agent][act] = DurationDistribution(
+                        "norm", mean=mean, std=std, minimum=min_val, maximum=max_val
+                    )
 
     return activity_duration_distribution_per_agent, stats_dict

@@ -37,7 +37,7 @@ class MAPPOTrainer:
         eval_freq_epochs=1,
         save_freq_epochs=1,
         log_freq_episodes=10,
-        eval_episodes=3,
+        eval_episodes=1,
         should_eval=True,
         experiment_dir="./experiments/mappo_default",
     ):
@@ -149,7 +149,7 @@ class MAPPOTrainer:
 
             # Save episode data with resource names and agent assignments
             # Create header with resource names
-            resource_names = [f"agent_{i}" for i in range(len(self.env.agents))]
+            resource_names = [agent.name for agent in self.env.agents]
             header = ";".join(resource_names)
             
             # Save actions with header
@@ -313,7 +313,7 @@ class MAPPOTrainer:
                 obs = next_obs
                 iteration += 1
                 if iteration % 1000 == 0:
-                    print(f"Evaluation iteration: {iteration}")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Evaluation iteration: {iteration}")
 
             eval_rewards.append(episode_reward)
 

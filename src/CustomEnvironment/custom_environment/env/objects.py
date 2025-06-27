@@ -1,6 +1,11 @@
 from enum import Enum
 import pandas as pd
 from typing import Callable, Optional, List, Tuple
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .custom_environment import AgentOptimizerEnvironment
+    from .duration_distribution import DurationDistribution
 
 from .typed_queue import Queue
 from env_config import debug_print_colored
@@ -31,7 +36,9 @@ class Task:
         self.assigned_timestamp: Optional[pd.Timestamp] = None
         self.start_timestamp: Optional[pd.Timestamp] = None
         self.completion_timestamp: Optional[pd.Timestamp] = None
-        self.environment = None  # Will be set when task is assigned to an agent
+        self.environment: Optional["AgentOptimizerEnvironment"] = (
+            None  # Will be set when task is assigned to an agent
+        )
 
     def __repr__(self) -> str:
         return f"Task(ID: {self.id}, case: {self.case_id}, status: {self.status.value})"
@@ -42,9 +49,18 @@ class Task:
         self.assigned_timestamp = timestamp
         self.status = Status.OPEN
         # Get reference to environment through the agent
-        if agent.current_case:
+        if (
+            agent.current_case is not None
+            and hasattr(agent.current_case, "environment")
+            and agent.current_case.environment is not None
+        ):
             self.environment = agent.current_case.environment
-        if agent.case_queue.size() > 0:
+        if (
+            agent.case_queue.size() > 0
+            and agent.case_queue.peek(0) is not None
+            and hasattr(agent.case_queue.peek(0), "environment")
+            and agent.case_queue.peek(0).environment is not None
+        ):
             self.environment = agent.case_queue.peek(0).environment
 
     def _start(self, timestamp: pd.Timestamp, duration: float) -> None:
@@ -83,6 +99,9 @@ class Task:
             raise ValueError("Task must be in progress to be completed.")
 
         self.status = Status.COMPLETED
+        self.completion_timestamp = (
+            timestamp  # Set completion timestamp to current time
+        )
         if self.assigned_agent:
             self.assigned_agent.busy_until = None
             # Set the completed task in the environment
@@ -91,22 +110,37 @@ class Task:
 
         debug_print_colored(f"Task {self.format()} completed at {timestamp}", "green")
 
-    def work(self, timestamp: pd.Timestamp, duration: float) -> bool:
+    def work(
+        self,
+        timestamp: pd.Timestamp,
+        duration_distribution: Optional["DurationDistribution"],
+    ) -> bool:
         """Work on this task."""
-        match self.status:
-            case Status.IN_PROGRESS:
-                if self.start_timestamp is None:
-                    raise ValueError("Task must be started before working on it.")
-                if self.completion_timestamp and self.completion_timestamp <= timestamp:
-                    debug_print_colored(f"Task {self.format()} has completed", "yellow")
-                    self._handle_completion(timestamp)
-                    return True
-            case Status.PENDING | Status.OPEN:
-                self._start(timestamp, duration)
-            case Status.COMPLETED:
-                debug_print_colored(f"Task {self.format()} has completed", "yellow")
-                return True
-        return False
+        if self.assigned_agent is None:
+            raise ValueError("Task must be assigned to an agent before starting.")
+        if self.status == Status.COMPLETED:
+            raise ValueError("Task is already completed.")
+
+        # If task is not started yet, start it
+        if self.status != Status.IN_PROGRESS:
+            if duration_distribution is not None:
+                duration = float(duration_distribution.generate_sample(1)[0])
+            else:
+                duration = 0.0
+
+            self._start(timestamp, duration)
+
+            # If duration is 0, immediately complete the task
+            if duration == 0.0:
+                self._handle_completion(timestamp)
+        # If task is in progress, check if it should be completed
+        elif (
+            self.completion_timestamp is not None
+            and timestamp >= self.completion_timestamp
+        ):
+            self._handle_completion(timestamp)
+
+        return self.status == Status.COMPLETED
 
     def format(self) -> str:
         """Format the task for display."""
@@ -127,7 +161,7 @@ class Case:
         self.start_timestamp: Optional[pd.Timestamp] = None
         self.completion_timestamp: Optional[pd.Timestamp] = None
         self.status: Status = Status.PENDING
-        self.environment = None  # Will be set when case is added to environment
+        self.environment: Optional["AgentOptimizerEnvironment"] = None
 
         # Task management
         self.all_tasks: List[Task] = tasks
@@ -175,9 +209,18 @@ class Case:
         self.assigned_timestamp = timestamp
         self.status = Status.OPEN
         # Get reference to environment through the agent
-        if agent.current_case:
+        if (
+            agent.current_case is not None
+            and hasattr(agent.current_case, "environment")
+            and agent.current_case.environment is not None
+        ):
             self.environment = agent.current_case.environment
-        if agent.case_queue.size() > 0:
+        if (
+            agent.case_queue.size() > 0
+            and agent.case_queue.peek(0) is not None
+            and hasattr(agent.case_queue.peek(0), "environment")
+            and agent.case_queue.peek(0).environment is not None
+        ):
             self.environment = agent.case_queue.peek(0).environment
 
         if agent.current_case is None:
@@ -221,7 +264,7 @@ class Case:
             raise ValueError(
                 f"Agent {self.assigned_agent.id} cannot perform task {self.current_task.id}"
             )
-        task_is_done = self.current_task.work(timestamp, duration_distribution())
+        task_is_done = self.current_task.work(timestamp, duration_distribution)
 
         if task_is_done:
             self._complete_task(timestamp)
@@ -312,15 +355,16 @@ class ResourceAgent:
     def __init__(
         self,
         resource_id: int,
-        capabilities: dict[int, Callable[[], float] | None],
+        name: str,
+        capabilities: dict[int, "DurationDistribution | None"],
         stats_dict: dict[str, dict[str, float]],
     ) -> None:
         self.id: int = resource_id
+        self.name: str = name
         self.case_queue: Queue["Case"] = Queue()
         self.current_case: Optional[Case] = None
         self.busy_until: Optional[pd.Timestamp] = None
-        # The distributions of each the agent's efficiency for each task
-        self.capabilities: dict[int, Callable[[], float] | None] = capabilities
+        self.capabilities: dict[int, "DurationDistribution | None"] = capabilities
         self.stats_dict: dict[str, dict[str, float]] = stats_dict
 
     def __repr__(self) -> str:
@@ -338,6 +382,13 @@ class ResourceAgent:
 
         if case is not None:
             case_is_done = case.work(timestamp)
+            if case_is_done:
+                # Clear the current case if it's done
+                if self.current_case == case:
+                    self.current_case = None
+                # Try to get next case from queue
+                if self.current_case is None and self.case_queue.size() > 0:
+                    self.current_case = self.case_queue.dequeue()
             return case_is_done, case
 
         return False, case
