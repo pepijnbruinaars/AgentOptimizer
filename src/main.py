@@ -16,17 +16,10 @@ from config import config
 from display import print_colored
 from preprocessing.load_data import load_data, split_data
 from preprocessing.preprocessing import remove_short_cases
+from utils.device_utils import get_device
+from utils.file_utils import ensure_directory_exists, create_timestamped_directory, append_text_file, save_text_file
 
 import env_config
-
-
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
 
 
 def train_mappo(env, experiment_dir: str, training_steps=100000):
@@ -99,10 +92,9 @@ def evaluate_agent(env, agent, episodes=10, output_dir=None):
     print_colored(f"Average reward over {episodes} episodes: {avg_reward:.2f}", "green")
 
     if output_dir:
-        # Save per-episode rewards
+        # Save per-episode rewards using shared utility
         rewards_file = os.path.join(output_dir, "rewards.csv")
-        with open(rewards_file, "a") as f:
-            f.write(f"{datetime.now()},{avg_reward:.2f}\n")
+        append_text_file(rewards_file, f"{datetime.now()},{avg_reward:.2f}\n")
 
     return avg_reward
 
@@ -118,10 +110,8 @@ def main():
         {"start_timestamp": data["start_timestamp"].min()}
     )
 
-    # Create timestamped directory for this experiment
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_dir = f"./experiments/mappo_{timestamp}"
-    os.makedirs(experiment_dir, exist_ok=True)
+    # Create timestamped directory for this experiment using shared utility
+    experiment_dir = create_timestamped_directory("./experiments", "mappo")
 
     # Initialize environment
     env = AgentOptimizerEnvironment(
@@ -194,11 +184,9 @@ if __name__ == "__main__":
             {"start_timestamp": data["start_timestamp"].min()}
         )
 
-        # Determine experiment folder from model path
+        # Determine experiment folder from model path and create evaluation directory
         experiment_dir = os.path.dirname(args.model_path.rstrip("/"))
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        eval_dir = os.path.join(experiment_dir, f"evaluation_{timestamp}")
-        os.makedirs(eval_dir, exist_ok=True)
+        eval_dir = create_timestamped_directory(experiment_dir, "evaluation")
 
         env = AgentOptimizerEnvironment(
             test,
@@ -216,10 +204,11 @@ if __name__ == "__main__":
             env, agent, episodes=args.episodes, output_dir=eval_dir
         )
 
-        # Save summary
-        with open(os.path.join(eval_dir, "summary.txt"), "w") as f:
-            f.write("Evaluation completed\n")
-            f.write(f"Average reward over {args.episodes} episodes: {avg_reward:.2f}\n")
+        # Save summary using shared utility
+        summary_content = f"""Evaluation completed
+Average reward over {args.episodes} episodes: {avg_reward:.2f}
+"""
+        save_text_file(os.path.join(eval_dir, "summary.txt"), summary_content)
 
         print_colored(f"Evaluation results saved in: {eval_dir}", "green")
         env.close()

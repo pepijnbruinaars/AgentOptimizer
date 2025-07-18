@@ -5,6 +5,8 @@ import pandas as pd
 from pathlib import Path
 import seaborn as sns
 
+from utils.timestamp_utils import convert_to_datetime, calculate_time_difference_minutes
+
 
 def plot_log_metrics(experiment_dir: str) -> None:
     """Plot metrics from log files in the experiment directory.
@@ -31,15 +33,24 @@ def plot_log_metrics(experiment_dir: str) -> None:
         processing_times = []
         
         for case_id, group in case_groups:
-            # Convert timestamps once for the entire group
+            # Convert timestamps once for the entire group using shared utility
             group_times = group[['start_timestamp', 'end_timestamp']].copy()
             for col in group_times.columns:
-                group_times[col] = pd.to_datetime(group_times[col], errors='coerce')
+                group_times[col] = convert_to_datetime(group_times[col], errors='coerce')
             
-            # Calculate waiting and processing times vectorized
-            waiting_times_vec = (group_times['start_timestamp'] - group_times['start_timestamp']).dt.total_seconds() / 60
-            processing_times_vec = (group_times['end_timestamp'] - group_times['start_timestamp']).dt.total_seconds() / 60
-            throughput_times_vec = (group_times['end_timestamp'] - group_times['start_timestamp']).dt.total_seconds() / 60
+            # Calculate waiting and processing times using shared utilities
+            waiting_times_vec = calculate_time_difference_minutes(
+                group_times['start_timestamp'], 
+                group_times['start_timestamp']
+            )
+            processing_times_vec = calculate_time_difference_minutes(
+                group_times['start_timestamp'],
+                group_times['end_timestamp']
+            )
+            throughput_times_vec = calculate_time_difference_minutes(
+                group_times['start_timestamp'],
+                group_times['end_timestamp']
+            )
             
             # Sum up the times for the case
             waiting = waiting_times_vec.sum()
@@ -76,16 +87,25 @@ def plot_log_metrics(experiment_dir: str) -> None:
         processing_times = []
         
         for case_id, group in case_groups:
-            # Convert timestamps
+            # Convert timestamps using shared utility
             group_times = group[['task_assigned_time', 'task_started_time', 'task_completed_time']].copy()
             for col in group_times.columns:
                 # Parse timestamps with the specific format including microseconds and timezone
-                group_times[col] = pd.to_datetime(group_times[col], format='%Y-%m-%d %H:%M:%S.%f%z')
+                group_times[col] = convert_to_datetime(group_times[col], format='%Y-%m-%d %H:%M:%S.%f%z')
             
-            # Calculate metrics (timestamps are now in UTC)
-            waiting_times_vec = (group_times['task_started_time'] - group_times['task_assigned_time']).dt.total_seconds() / 60
-            processing_times_vec = (group_times['task_completed_time'] - group_times['task_started_time']).dt.total_seconds() / 60
-            throughput_times_vec = (group_times['task_completed_time'] - group_times['task_assigned_time']).dt.total_seconds() / 60
+            # Calculate metrics using shared utilities (timestamps are now in UTC)
+            waiting_times_vec = calculate_time_difference_minutes(
+                group_times['task_assigned_time'],
+                group_times['task_started_time']
+            )
+            processing_times_vec = calculate_time_difference_minutes(
+                group_times['task_started_time'],
+                group_times['task_completed_time']
+            )
+            throughput_times_vec = calculate_time_difference_minutes(
+                group_times['task_assigned_time'],
+                group_times['task_completed_time']
+            )
             
             # Sum up the times for the case
             waiting = waiting_times_vec.sum()

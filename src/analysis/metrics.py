@@ -1,6 +1,8 @@
 import pandas as pd
 from typing import Literal, Dict
 
+from utils.timestamp_utils import calculate_time_difference_minutes, calculate_time_difference_seconds
+
 # Define a type for time units
 TimeUnit = Literal["seconds", "minutes", "hours"]
 
@@ -22,7 +24,10 @@ def throughput_time(
     - end_time: The time when the case/task ended.
     - assigned_time: The time when the case/task was assigned.
     """
-    return (end_time - assigned_time).total_seconds() / time_units[unit]
+    if unit == "minutes":
+        return calculate_time_difference_minutes(pd.Series([assigned_time]), pd.Series([end_time])).iloc[0]
+    else:
+        return calculate_time_difference_seconds(pd.Series([assigned_time]), pd.Series([end_time])).iloc[0] / time_units[unit]
 
 
 def waiting_time(
@@ -34,7 +39,10 @@ def waiting_time(
     - start_time: The time when the case/task started processing.
     - assigned_time: The time when the case/task was assigned.
     """
-    return (start_time - assigned_time).total_seconds() / time_units[unit]
+    if unit == "minutes":
+        return calculate_time_difference_minutes(pd.Series([assigned_time]), pd.Series([start_time])).iloc[0]
+    else:
+        return calculate_time_difference_seconds(pd.Series([assigned_time]), pd.Series([start_time])).iloc[0] / time_units[unit]
 
 
 def processing_time(
@@ -46,7 +54,10 @@ def processing_time(
     - start_time: The time when the case/task started processing.
     - end_time: The time when the case/task ended.
     """
-    return (end_time - start_time).total_seconds() / time_units[unit]
+    if unit == "minutes":
+        return calculate_time_difference_minutes(pd.Series([start_time]), pd.Series([end_time])).iloc[0]
+    else:
+        return calculate_time_difference_seconds(pd.Series([start_time]), pd.Series([end_time])).iloc[0] / time_units[unit]
 
 
 # ==== UTILIZATION METRICS ====

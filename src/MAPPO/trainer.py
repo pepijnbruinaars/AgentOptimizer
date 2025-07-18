@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 from .agent import MAPPOAgent
+from utils.file_utils import ensure_directory_exists, save_numpy_csv, save_text_file
 
 
 def map_actions_to_array(actions: dict[int, int]) -> np.ndarray:
@@ -52,9 +53,9 @@ class MAPPOTrainer:
         self.experiment_dir = experiment_dir
 
         # Create experiment directory structure
-        os.makedirs(self.experiment_dir, exist_ok=True)
+        ensure_directory_exists(self.experiment_dir)
         self.episodes_dir = os.path.join(self.experiment_dir, "episodes")
-        os.makedirs(self.episodes_dir, exist_ok=True)
+        ensure_directory_exists(self.episodes_dir)
 
         # Initialize tracking variables
         self.epochs_done = 0
@@ -79,7 +80,7 @@ class MAPPOTrainer:
         while self.epochs_done < self.total_epochs:
             # Create episode directory
             episode_dir = os.path.join(self.episodes_dir, f"episode_{self.episodes_done}")
-            os.makedirs(episode_dir, exist_ok=True)
+            ensure_directory_exists(episode_dir)
 
             # Run one epoch (one complete episode)
             obs, _ = self.env.reset()
@@ -152,52 +153,53 @@ class MAPPOTrainer:
             resource_names = [agent.name for agent in self.env.agents]
             header = ";".join(resource_names)
             
-            # Save actions with header
-            np.savetxt(
+            # Save actions with header using shared utility
+            save_numpy_csv(
                 os.path.join(episode_dir, "actions.csv"),
                 episode_actions,
                 delimiter=";",
                 header=header,
-                comments="",
+                comments=""
             )
             
-            # Save action probabilities with header
-            np.savetxt(
+            # Save action probabilities with header using shared utility
+            save_numpy_csv(
                 os.path.join(episode_dir, "action_probs.csv"),
                 episode_action_probs,
                 delimiter=";",
                 header=header,
-                comments="",
+                comments=""
             )
             
-            # Save assigned agents
-            np.savetxt(
+            # Save assigned agents using shared utility
+            save_numpy_csv(
                 os.path.join(episode_dir, "assigned_agents.csv"),
                 np.array(episode_assigned_agents, dtype=float),  # Convert to float array, None becomes nan
                 delimiter=";",
                 header="assigned_agent",
-                comments="",
+                comments=""
             )
             
-            # Save other episode data
-            np.savetxt(
+            # Save other episode data using shared utility
+            save_numpy_csv(
                 os.path.join(episode_dir, "rewards.csv"),
                 episode_rewards,
-                delimiter=";",
+                delimiter=";"
             )
-            np.savetxt(
+            save_numpy_csv(
                 os.path.join(episode_dir, "cumulative_rewards.csv"),
                 episode_cumulative_rewards,
-                delimiter=";",
+                delimiter=";"
             )
 
-            # Save episode summary
-            with open(os.path.join(episode_dir, "summary.txt"), "w") as f:
-                f.write(f"Episode {self.episodes_done}\n")
-                f.write(f"Total Reward: {episode_reward:.2f}\n")
-                f.write(f"Episode Length: {episode_length}\n")
-                f.write(f"Time: {time.perf_counter() - episode_time:.2f} seconds\n")
-                f.write(f"Cumulative Reward: {self.total_cumulative_reward:.2f}\n")
+            # Save episode summary using shared utility
+            summary_content = f"""Episode {self.episodes_done}
+Total Reward: {episode_reward:.2f}
+Episode Length: {episode_length}
+Time: {time.perf_counter() - episode_time:.2f} seconds
+Cumulative Reward: {self.total_cumulative_reward:.2f}
+"""
+            save_text_file(os.path.join(episode_dir, "summary.txt"), summary_content)
 
             self.episodes_done += 1
             self.epochs_done += 1
@@ -223,18 +225,18 @@ class MAPPOTrainer:
                 self.cumulative_eval_rewards.extend(eval_cumulative_rewards)
                 print(f"Evaluation at epoch {self.epochs_done}: {eval_reward:.2f}")
 
-                # Save evaluation results
+                # Save evaluation results using shared utilities
                 eval_dir = os.path.join(episode_dir, "evaluation")
-                os.makedirs(eval_dir, exist_ok=True)
-                np.savetxt(
+                ensure_directory_exists(eval_dir)
+                save_numpy_csv(
                     os.path.join(eval_dir, "eval_reward.csv"),
                     [eval_reward],
-                    delimiter=";",
+                    delimiter=";"
                 )
-                np.savetxt(
+                save_numpy_csv(
                     os.path.join(eval_dir, "eval_cumulative_rewards.csv"),
                     eval_cumulative_rewards,
-                    delimiter=";",
+                    delimiter=";"
                 )
 
                 # Save best model
@@ -250,34 +252,38 @@ class MAPPOTrainer:
                 )
                 print(f"Checkpoint saved at epoch {self.epochs_done}")
 
-        # Save final model and training summary
+        # Save final model and training summary using shared utilities
         self.agent.save_models(os.path.join(self.experiment_dir, "final"))
         
-        # Save training summary and cumulative rewards
-        with open(os.path.join(self.experiment_dir, "training_summary.txt"), "w") as f:
-            f.write(f"Training completed after {self.epochs_done} epochs\n")
-            f.write(f"Total episodes: {self.episodes_done}\n")
-            f.write(f"Total timesteps: {self.timesteps_done}\n")
-            f.write(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes\n")
-            f.write(f"Best evaluation reward: {self.best_eval_reward:.2f}\n")
-            f.write(f"Final cumulative reward: {self.total_cumulative_reward:.2f}\n")
-            f.write("\nEpisode Rewards:\n")
-            for i, reward in enumerate(self.episode_rewards):
-                f.write(f"Episode {i}: {reward:.2f}\n")
-            f.write("\nEvaluation Rewards:\n")
-            for i, reward in enumerate(self.eval_rewards):
-                f.write(f"Eval {i}: {reward:.2f}\n")
+        # Build training summary content
+        summary_content = f"""Training completed after {self.epochs_done} epochs
+Total episodes: {self.episodes_done}
+Total timesteps: {self.timesteps_done}
+Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes
+Best evaluation reward: {self.best_eval_reward:.2f}
+Final cumulative reward: {self.total_cumulative_reward:.2f}
 
-        # Save cumulative rewards for plotting
-        np.savetxt(
+Episode Rewards:
+"""
+        for i, reward in enumerate(self.episode_rewards):
+            summary_content += f"Episode {i}: {reward:.2f}\n"
+            
+        summary_content += "\nEvaluation Rewards:\n"
+        for i, reward in enumerate(self.eval_rewards):
+            summary_content += f"Eval {i}: {reward:.2f}\n"
+            
+        save_text_file(os.path.join(self.experiment_dir, "training_summary.txt"), summary_content)
+
+        # Save cumulative rewards for plotting using shared utilities
+        save_numpy_csv(
             os.path.join(self.experiment_dir, "cumulative_rewards.csv"),
             self.cumulative_rewards,
-            delimiter=";",
+            delimiter=";"
         )
-        np.savetxt(
+        save_numpy_csv(
             os.path.join(self.experiment_dir, "cumulative_eval_rewards.csv"),
             self.cumulative_eval_rewards,
-            delimiter=";",
+            delimiter=";"
         )
 
         print(

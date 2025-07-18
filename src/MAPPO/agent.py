@@ -7,7 +7,8 @@ from collections import deque
 import os
 
 from display import print_colored
-
+from utils.device_utils import get_device_or_fallback
+from utils.file_utils import ensure_directory_exists, save_torch_model, load_torch_model, save_text_file
 
 from .networks import ActorNetwork, CriticNetwork
 
@@ -36,15 +37,7 @@ class MAPPOAgent:
         self.num_epochs = num_epochs
 
         # Set device for GPU/MPS acceleration
-        if device is None:
-            if torch.cuda.is_available():
-                self.device = torch.device("cuda")
-            elif torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-            else:
-                self.device = torch.device("cpu")
-        else:
-            self.device = device
+        self.device = get_device_or_fallback(device)
 
         print_colored(f"MAPPOAgent using device: {self.device}", "blue")
 
@@ -471,32 +464,31 @@ class MAPPOAgent:
         }
 
     def save_models(self, path):
-        """Save model weights to the specified path."""
-        # Save critic
-        # Check if directory exists, if not create it
-        if not os.path.exists(path):
-            os.makedirs(path)
-        torch.save(self.critic.state_dict(), f"{path}/critic.pt")
+        """Save model weights to the specified path using shared utilities."""
+        # Ensure directory exists using shared utility
+        ensure_directory_exists(path)
+        
+        # Save critic using shared utility
+        save_torch_model(self.critic.state_dict(), f"{path}/critic.pt")
 
-        # Save actors
+        # Save actors using shared utility
         for agent_id, actor in self.actors.items():
-            torch.save(actor.state_dict(), f"{path}/actor_{agent_id}.pt")
+            save_torch_model(actor.state_dict(), f"{path}/actor_{agent_id}.pt")
 
-        # Save device info
-        with open(f"{path}/device.txt", "w") as f:
-            f.write(str(self.device))
+        # Save device info using shared utility
+        save_text_file(f"{path}/device.txt", str(self.device))
 
     def load_models(self, path):
-        """Load model weights from the specified path."""
-        # Load critic
+        """Load model weights from the specified path using shared utilities."""
+        # Load critic using shared utility
         self.critic.load_state_dict(
-            torch.load(f"{path}/critic.pt", map_location=self.device)
+            load_torch_model(f"{path}/critic.pt", self.device)
         )
 
-        # Load actors
+        # Load actors using shared utility
         for agent_id, actor in self.actors.items():
             actor.load_state_dict(
-                torch.load(f"{path}/actor_{agent_id}.pt", map_location=self.device)
+                load_torch_model(f"{path}/actor_{agent_id}.pt", self.device)
             )
 
         # After loading, move models to CPU for simulation

@@ -4,25 +4,22 @@ import torch.nn.functional as F
 import numpy as np
 from gymnasium import spaces
 
+from utils.observation_utils import (
+    process_observation_to_tensor,
+    process_observation_batch_to_tensors,
+    calculate_observation_size,
+    get_observation_keys
+)
+
 
 class ActorNetwork(nn.Module):
     def __init__(self, obs_space, action_space, hidden_size=128, device=None):
         super(ActorNetwork, self).__init__()
         self.device = device if device is not None else torch.device("cpu")
 
-        # Calculate input size from observation space
-        input_size = 0
-        self.obs_keys = []
-
-        # Process Dict observation space
-        for key, space in obs_space.items():
-            self.obs_keys.append(key)
-            if isinstance(space, spaces.Discrete):
-                input_size += 1
-            elif isinstance(space, spaces.Box):
-                input_size += int(np.prod(space.shape))
-            elif isinstance(space, spaces.MultiBinary):
-                input_size += int(np.prod(space.shape))
+        # Calculate input size from observation space and store keys
+        self.obs_keys = get_observation_keys(obs_space)
+        input_size = calculate_observation_size(obs_space)
 
         # Add reward history to input size
         input_size += 1  # For current reward
@@ -35,28 +32,9 @@ class ActorNetwork(nn.Module):
         self.action_head = nn.Linear(hidden_size, action_space.n)
 
     def forward(self, obs_dict, reward=None):
-        # Process observation dictionary into a flat vector
-        x_parts = []
-
-        # Get the current device of the model
+        # Process observation dictionary into a flat vector using shared utility
         current_device = next(self.parameters()).device
-
-        for key in self.obs_keys:
-            if key in obs_dict:
-                # Handle different observation components
-                if isinstance(obs_dict[key], np.ndarray):
-                    # Use from_numpy for better performance, then move to device
-                    tensor_data = torch.from_numpy(
-                        obs_dict[key].flatten().astype(np.float32)
-                    )
-                    x_parts.append(tensor_data.to(current_device))
-                else:
-                    # Handle scalar values or other types
-                    x_parts.append(
-                        torch.tensor(
-                            [obs_dict[key]], device=current_device, dtype=torch.float32
-                        )
-                    )
+        x_parts = process_observation_to_tensor(obs_dict, self.obs_keys, current_device)
 
         # Add current reward to input (create as single tensor)
         reward_tensor = torch.tensor(
@@ -81,36 +59,17 @@ class ActorNetwork(nn.Module):
         # Get the current device of the model
         current_device = next(self.parameters()).device
 
-        # Pre-allocate lists for better performance
-        batch_inputs = []
+        # Process all observations efficiently using shared utility
+        x_batch = process_observation_batch_to_tensors(obs_dicts, self.obs_keys, current_device)
 
-        # Process all observations efficiently
-        for i, obs_dict in enumerate(obs_dicts):
-            x_parts = []
-
-            for key in self.obs_keys:
-                if key in obs_dict:
-                    # Handle different observation components
-                    if isinstance(obs_dict[key], np.ndarray):
-                        # Convert to tensor efficiently
-                        tensor_data = torch.from_numpy(
-                            obs_dict[key].flatten().astype(np.float32)
-                        )
-                        x_parts.append(tensor_data)
-                    else:
-                        x_parts.append(
-                            torch.tensor([obs_dict[key]], dtype=torch.float32)
-                        )
-
-            # Add current reward to input
-            reward = rewards[i] if rewards is not None else 0.0
-            x_parts.append(torch.tensor([reward], dtype=torch.float32))
-
-            # Concatenate and add to batch (still on CPU)
-            batch_inputs.append(torch.cat(x_parts))
-
-        # Move entire batch to device at once
-        x_batch = torch.stack(batch_inputs).to(current_device)
+        # Add rewards to each observation in batch
+        if rewards is not None:
+            reward_tensors = torch.tensor(rewards, device=current_device, dtype=torch.float32).unsqueeze(1)
+        else:
+            reward_tensors = torch.zeros(len(obs_dicts), 1, device=current_device, dtype=torch.float32)
+        
+        # Concatenate observations with rewards
+        x_batch = torch.cat([x_batch, reward_tensors], dim=1)
 
         # Process through network (batch processing)
         x = F.relu(self.fc1(x_batch))
@@ -145,18 +104,8 @@ class CriticNetwork(nn.Module):
         # and potentially global state information
 
         # Calculate input size from observation space (for all agents)
-        single_agent_obs_size = 0
-        self.obs_keys = []
-
-        # Process Dict observation space
-        for key, space in obs_space.items():
-            self.obs_keys.append(key)
-            if isinstance(space, spaces.Discrete):
-                single_agent_obs_size += 1  # One-hot encoding
-            elif isinstance(space, spaces.Box):
-                single_agent_obs_size += int(np.prod(space.shape))
-            elif isinstance(space, spaces.MultiBinary):
-                single_agent_obs_size += int(np.prod(space.shape))
+        single_agent_obs_size = calculate_observation_size(obs_space)
+        self.obs_keys = get_observation_keys(obs_space)
 
         # Total input size = single agent obs size * number of agents + reward
         input_size = single_agent_obs_size * n_agents + 1  # +1 for reward
@@ -168,33 +117,12 @@ class CriticNetwork(nn.Module):
         self.value_head = nn.Linear(hidden_size, 1)
 
     def forward(self, obs_dicts, reward=None):
-        # Process and concatenate observations from all agents
+        # Process and concatenate observations from all agents using shared utility
+        current_device = next(self.parameters()).device
         all_agent_inputs = []
 
-        # Get the current device of the model
-        current_device = next(self.parameters()).device
-
         for agent_obs in obs_dicts:
-            agent_parts = []
-            for key in self.obs_keys:
-                if key in agent_obs:
-                    # Handle different observation components
-                    if isinstance(agent_obs[key], np.ndarray):
-                        # Use from_numpy for better performance
-                        tensor_data = torch.from_numpy(
-                            agent_obs[key].flatten().astype(np.float32)
-                        )
-                        agent_parts.append(tensor_data.to(current_device))
-                    else:
-                        # Handle scalar values
-                        agent_parts.append(
-                            torch.tensor(
-                                [agent_obs[key]],
-                                device=current_device,
-                                dtype=torch.float32,
-                            )
-                        )
-
+            agent_parts = process_observation_to_tensor(agent_obs, self.obs_keys, current_device)
             if agent_parts:
                 agent_input = torch.cat(agent_parts)
                 all_agent_inputs.append(agent_input)
@@ -227,26 +155,15 @@ class CriticNetwork(nn.Module):
         batch_inputs = []
 
         for i, obs_dicts in enumerate(obs_dicts_batch):
-            # Process and concatenate observations from all agents for this sample
+            # Process and concatenate observations from all agents for this sample using shared utility
             all_agent_inputs = []
 
             for agent_obs in obs_dicts:
-                agent_parts = []
-                for key in self.obs_keys:
-                    if key in agent_obs:
-                        # Handle different observation components
-                        if isinstance(agent_obs[key], np.ndarray):
-                            tensor_data = torch.from_numpy(
-                                agent_obs[key].flatten().astype(np.float32)
-                            )
-                            agent_parts.append(tensor_data)
-                        else:
-                            agent_parts.append(
-                                torch.tensor([agent_obs[key]], dtype=torch.float32)
-                            )
-
+                agent_parts = process_observation_to_tensor(agent_obs, self.obs_keys, torch.device("cpu"))
                 if agent_parts:
-                    agent_input = torch.cat(agent_parts)
+                    # Convert back to CPU for concatenation
+                    agent_parts_cpu = [part.cpu() if part.device != torch.device("cpu") else part for part in agent_parts]
+                    agent_input = torch.cat(agent_parts_cpu)
                     all_agent_inputs.append(agent_input)
 
             # Concatenate all agents' observations for this sample
