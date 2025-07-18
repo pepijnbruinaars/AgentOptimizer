@@ -52,7 +52,7 @@ from src.display import print_colored
 from src.preprocessing.load_data import load_data, split_data
 from src.preprocessing.preprocessing import remove_short_cases
 # Import shared utilities to avoid code duplication
-from src.utils import get_device, load_trained_mappo_agent, load_trained_qmix_agent
+from src.utils import get_device, load_trained_mappo_agent, load_trained_qmix_agent, create_performance_data
 
 
 # Dataset configurations
@@ -428,37 +428,6 @@ class BaselineEvaluator:
 
 
 
-def create_performance_data(env):
-    """Create performance data for BestMedianAgent based on agent capabilities."""
-    performance_data = {}
-
-    for agent in env.agents:
-        base_performance = np.random.uniform(0.4, 0.8)
-        performance_variations = np.random.normal(0, 0.1, 10)
-        performance_data[agent.id] = np.clip(
-            base_performance + performance_variations, 0.0, 1.0
-        ).tolist()
-
-        try:
-            if hasattr(agent, "capabilities") and hasattr(agent, "stats_dict"):
-                capable_tasks = sum(
-                    1 for v in agent.capabilities.values() if v is not None
-                )
-                capability_ratio = (
-                    capable_tasks / len(agent.capabilities)
-                    if agent.capabilities
-                    else 0.5
-                )
-
-                adjusted_base = 0.3 + (0.6 * capability_ratio)
-                variations = np.random.normal(0, 0.15, 10)
-                performance_data[agent.id] = np.clip(
-                    adjusted_base + variations, 0.0, 1.0
-                ).tolist()
-        except Exception:
-            pass
-
-    return performance_data
 
 
 def load_dataset(dataset_name: str, data_dir: str = "./data/input") -> pd.DataFrame:

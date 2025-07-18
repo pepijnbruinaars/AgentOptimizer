@@ -4,6 +4,7 @@ This module contains common helper functions to reduce code duplication.
 """
 import torch
 import os
+import numpy as np
 from typing import Optional, Union
 from display import print_colored
 
@@ -21,6 +22,56 @@ def get_device():
         return torch.device("mps")
     else:
         return torch.device("cpu")
+
+
+def create_performance_data(env):
+    """
+    Create performance data for BestMedianAgent based on agent capabilities.
+    In practice, this would come from historical agent performance data.
+
+    Args:
+        env: The environment with agents
+
+    Returns:
+        Dict mapping agent_id to list of performance scores
+    """
+    performance_data = {}
+
+    # Generate more realistic performance data based on agent capabilities if available
+    for agent in env.agents:
+        # Base performance with some variability
+        base_performance = np.random.uniform(0.4, 0.8)
+        performance_variations = np.random.normal(0, 0.1, 10)
+        performance_data[agent.id] = np.clip(
+            base_performance + performance_variations, 0.0, 1.0
+        ).tolist()
+
+        # Try to check agent's capabilities for more realistic data if available
+        try:
+            if hasattr(agent, "capabilities") and hasattr(agent, "stats_dict"):
+                # Adjust based on the number of tasks the agent can perform
+                capable_tasks = sum(
+                    1 for v in agent.capabilities.values() if v is not None
+                )
+                capability_ratio = (
+                    capable_tasks / len(agent.capabilities)
+                    if agent.capabilities
+                    else 0.5
+                )
+
+                # Higher capability ratio = better base performance
+                adjusted_base = 0.3 + (0.6 * capability_ratio)
+
+                # Create performance data with some variability
+                variations = np.random.normal(0, 0.15, 10)
+                performance_data[agent.id] = np.clip(
+                    adjusted_base + variations, 0.0, 1.0
+                ).tolist()
+        except Exception:
+            # Fall back to default if there's any issue
+            pass
+
+    return performance_data
 
 
 def load_trained_mappo_agent(env, model_path: Optional[str] = None, create_new_if_missing: bool = True):
