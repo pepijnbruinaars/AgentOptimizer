@@ -3,7 +3,7 @@ from gymnasium.spaces import Discrete, MultiBinary, Box, Dict as GymDict
 from pettingzoo import ParallelEnv  # type: ignore
 import numpy as np
 
-from typing import TypedDict
+from typing import TypedDict, Optional, Mapping, Dict
 import pandas as pd
 
 from env_config import debug_print_colored  # type: ignore
@@ -12,7 +12,11 @@ from env_config import debug_print_colored  # type: ignore
 from .reward import get_reward
 from .objects import Case, Task, ResourceAgent, Status
 from display import display_indented_list  # type: ignore
-from .data_handling import compute_activity_duration_distribution_per_agent
+from .data_handling import (
+    compute_activity_duration_distribution_per_agent,
+    compute_global_activity_medians,
+)
+from .duration_distribution import DurationDistribution
 from .constants import MAX_TASKS_PER_AGENT
 
 
@@ -32,6 +36,13 @@ class AgentOptimizerEnvironment(ParallelEnv):
         data: pd.DataFrame,
         simulation_parameters: SimulationParameters,
         experiment_dir: str | None = None,
+        pre_fitted_distributions: Optional[
+            tuple[
+                Mapping[str, Mapping[str, Optional[DurationDistribution]]],
+                Mapping[str, Mapping[str, Optional[Dict[str, float]]]],
+                Dict[str, float],
+            ]
+        ] = None,
     ) -> None:
         super().__init__()
         print("Initializing environment...")
@@ -77,9 +88,29 @@ class AgentOptimizerEnvironment(ParallelEnv):
         }
 
         # Fit distributions for each agent and activity
-        activity_durations_dict, stats_dict = (
-            compute_activity_duration_distribution_per_agent(self.data)
-        )
+        if pre_fitted_distributions is not None:
+            # Use pre-fitted distributions (fitted on training data)
+            activity_durations_dict, stats_dict, global_activity_medians = (
+                pre_fitted_distributions
+            )
+            print("Using pre-fitted duration distributions from training data")
+        else:
+            # Fit distributions on the current data (original behavior)
+            activity_durations_dict, stats_dict = (
+                compute_activity_duration_distribution_per_agent(self.data)
+            )
+            # Compute global historical medians for each activity (across all agents)
+            global_activity_medians = compute_global_activity_medians(self.data)
+            print("Fitting duration distributions on current dataset")
+
+        # Store global activity medians
+        self.global_activity_medians = global_activity_medians
+
+        # Transform the global medians to use task IDs instead of activity names
+        self.global_task_medians = {
+            self.task_dict[activity]: median
+            for activity, median in self.global_activity_medians.items()
+        }
 
         # Transform the distributions to use task IDs instead of activity names
         transformed_activity_durations_dict = {
@@ -117,12 +148,20 @@ class AgentOptimizerEnvironment(ParallelEnv):
         print(f"# tasks to be performed: {len(self.data)}")
         print("---------" * 8)
 
+    def resource_name_to_id(self, resource_name: str) -> int:
+        """Convert a resource name to its corresponding ID."""
+        if resource_name in self.resource_dict:
+            return self.resource_dict[resource_name]
+        else:
+            raise ValueError(
+                f"Resource '{resource_name}' not found in resource dictionary."
+            )
+
     def _initialize_future_cases(self) -> list[Case]:
         """Function that initializes the future cases with the first event of each case in the data."""
         future_cases: list[Case] = []
         # Group the data by case_id, and iterate over each case
         grouped_and_sorted = self.data.sort_values("start_timestamp").groupby("case_id")
-        print(len(grouped_and_sorted))
         for case_id, case_data in grouped_and_sorted:
             # Start timestamp of a case is the earliest timestamp of the case
             start_timestamp = case_data["start_timestamp"].min()

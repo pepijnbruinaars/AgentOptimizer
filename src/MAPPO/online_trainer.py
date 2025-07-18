@@ -9,90 +9,6 @@ from display import print_colored
 from .agent import MAPPOAgent
 
 
-def get_model_architecture_summary(agent) -> str:
-    """Get a detailed summary of the model architecture."""
-    summary = []
-    summary.append("Model Architecture")
-    summary.append("=" * 18)
-
-    # Get basic configuration
-    summary.append(f"Number of agents: {agent.n_agents}")
-    summary.append(f"Device: {agent.device}")
-    summary.append(f"Gamma (discount factor): {agent.gamma}")
-    summary.append(f"GAE Lambda: {agent.gae_lambda}")
-    summary.append(f"Clip parameter: {agent.clip_param}")
-    summary.append(f"Batch size: {agent.batch_size}")
-    summary.append(f"Number of epochs: {agent.num_epochs}")
-    summary.append("")
-
-    # Actor networks
-    summary.append("Actor Networks:")
-    first_actor = next(iter(agent.actors.values()))
-    total_actor_params = 0
-
-    for agent_id, actor in agent.actors.items():
-        actor_params = sum(p.numel() for p in actor.parameters() if p.requires_grad)
-        total_actor_params += actor_params
-        summary.append(f"  Agent {agent_id}: {actor_params:,} trainable parameters")
-
-    summary.append(f"  Total actor parameters: {total_actor_params:,}")
-    summary.append("")
-
-    # Actor architecture details
-    summary.append("Actor Architecture:")
-    actor_layers = []
-    for name, module in first_actor.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            actor_layers.append(
-                f"  {name}: Linear({module.in_features} -> {module.out_features})"
-            )
-        elif isinstance(module, torch.nn.Dropout):
-            actor_layers.append(f"  {name}: Dropout(p={module.p})")
-
-    if actor_layers:
-        summary.extend(actor_layers)
-    summary.append("")
-
-    # Critic network
-    summary.append("Critic Network:")
-    critic_params = sum(p.numel() for p in agent.critic.parameters() if p.requires_grad)
-    summary.append(f"  Trainable parameters: {critic_params:,}")
-    summary.append("")
-
-    # Critic architecture details
-    summary.append("Critic Architecture:")
-    critic_layers = []
-    for name, module in agent.critic.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            critic_layers.append(
-                f"  {name}: Linear({module.in_features} -> {module.out_features})"
-            )
-        elif isinstance(module, torch.nn.Dropout):
-            critic_layers.append(f"  {name}: Dropout(p={module.p})")
-
-    if critic_layers:
-        summary.extend(critic_layers)
-    summary.append("")
-
-    # Total parameters
-    total_params = total_actor_params + critic_params
-    summary.append(f"Total trainable parameters: {total_params:,}")
-    summary.append("")
-
-    # Optimizer information
-    summary.append("Optimizers:")
-    first_actor_optimizer = next(iter(agent.actor_optimizers.values()))
-    summary.append(
-        f"  Actor learning rate: {first_actor_optimizer.param_groups[0]['lr']}"
-    )
-    summary.append(
-        f"  Critic learning rate: {agent.critic_optimizer.param_groups[0]['lr']}"
-    )
-    summary.append("")
-
-    return "\n".join(summary)
-
-
 def map_actions_to_array(actions: dict[int, int]) -> np.ndarray:
     """Maps the actions output dict to an array with the nth key mapped to the nth index."""
     array = np.zeros(len(actions))
@@ -106,7 +22,7 @@ def map_actions_to_array(actions: dict[int, int]) -> np.ndarray:
 def map_action_probs_to_array(
     action_probs: dict[int, np.ndarray],
 ) -> np.ndarray:
-    """Maps the action probabilities output dict to an array with the nth key mapped to the nth index. This is a 3D matrix"""
+    """Maps the action probabilities output dict to an array with the nth key mapped to the nth index."""
     array = np.zeros((len(action_probs)))
 
     for i, key in enumerate(action_probs.keys()):
@@ -115,22 +31,27 @@ def map_action_probs_to_array(
     return array
 
 
-class MAPPOTrainer:
+class MAPPOOnlineTrainer:
+    """
+    Online MAPPO trainer that updates policies at every timestep.
+    This version doesn't use GPU/MPS acceleration and runs entirely on CPU.
+    """
+    
     def __init__(
         self,
         env,
         mappo_agent: MAPPOAgent,
-        total_training_episodes=50,  # Renamed for clarity
+        total_training_episodes=50,
         eval_freq_episodes=1,
         save_freq_episodes=1,
         log_freq_episodes=10,
         eval_episodes=1,
         should_eval=True,
-        experiment_dir="./experiments/mappo_default",
+        experiment_dir="./experiments/mappo_online_default",
     ):
         self.env = env
         self.agent = mappo_agent
-        self.total_training_episodes = total_training_episodes  # Renamed for clarity
+        self.total_training_episodes = total_training_episodes
         self.eval_freq_episodes = eval_freq_episodes
         self.save_freq_episodes = save_freq_episodes
         self.log_freq_episodes = log_freq_episodes
@@ -144,7 +65,7 @@ class MAPPOTrainer:
         os.makedirs(self.episodes_dir, exist_ok=True)
 
         # Initialize tracking variables
-        self.episodes_done = 0  # Renamed from epochs_done for clarity
+        self.episodes_done = 0
         self.timesteps_done = 0
         self.best_eval_reward = -float("inf")
         self.episode_rewards: list[float] = []
@@ -156,9 +77,16 @@ class MAPPOTrainer:
         self.cumulative_eval_rewards: list[float] = []
         self.total_cumulative_reward = 0.0
 
+        # Force agent to use CPU only (no GPU/MPS acceleration)
+        self.agent.device = torch.device("cpu")
+        self.agent._move_models_to_cpu()
+        
+        print_colored("Online MAPPO Trainer initialized - all computations on CPU", "blue")
+
     def train(self) -> list[float]:
-        """Main training loop for MAPPO."""
-        print(f"Starting MAPPO training for {self.total_training_episodes} episodes...")
+        """Main training loop for online MAPPO (policy updates at every timestep)."""
+        print(f"Starting online MAPPO training for {self.total_training_episodes} episodes...")
+        print_colored("Policy will be updated at every timestep", "yellow")
 
         start_time = time.perf_counter()
 
@@ -169,9 +97,9 @@ class MAPPOTrainer:
             )
             os.makedirs(episode_dir, exist_ok=True)
 
-            # Run one epoch (one complete episode)
+            # Run one episode with online updates
             obs, _ = self.env.reset()
-            episode_reward = 0.0  # Initialize as float
+            episode_reward = 0.0
             episode_length = 0
             episode_time = time.perf_counter()
 
@@ -180,16 +108,18 @@ class MAPPOTrainer:
             episode_action_probs: list[np.ndarray] = []
             episode_rewards: list[float] = []
             episode_cumulative_rewards: list[float] = []
-            episode_assigned_agents: list[int | None] = []  # Track assigned agents
+            episode_assigned_agents: list[int | None] = []
 
             done = False
+            timestep_in_episode = 0
+            
             while not done:
                 # Select actions using the current policy
                 actions, action_probs = self.agent.select_actions(obs)
                 episode_actions.append(map_actions_to_array(actions))
                 episode_action_probs.append(map_action_probs_to_array(action_probs))
 
-                # Get state value
+                # Get state value for current observation
                 value = self.agent.compute_values(obs)
 
                 # Take actions in the environment
@@ -219,24 +149,35 @@ class MAPPOTrainer:
                 self.cumulative_rewards.append(self.total_cumulative_reward)
                 episode_cumulative_rewards.append(self.total_cumulative_reward)
 
-                # Store experience
+                # Check if episode is done
                 done = any(list(dones.values()) + list(truncated.values()))
+
+                # Store experience for this timestep
                 self.agent.store_experience(
                     obs, actions, action_probs, step_reward, done, value
                 )
 
+                # ONLINE UPDATE: Update policy after every timestep
+                if len(self.agent.buffer["obs"]) >= 1:  # We have at least one experience
+                    self.agent.update_policy_online()
+
                 # Update episode tracking
                 episode_reward += step_reward
                 episode_length += 1
+                timestep_in_episode += 1
 
                 # Move to the next step
                 obs = next_obs
                 self.timesteps_done += 1
 
-            # Episode completed - update policy
-            self.agent.update_policy()
+                # Log timestep progress occasionally
+                if timestep_in_episode % 50 == 0:
+                    print_colored(
+                        f"Episode {self.episodes_done+1} - Timestep {timestep_in_episode}, Reward: {step_reward:.2f}",
+                        "cyan"
+                    )
 
-            # Log performance
+            # Episode completed
             self.episode_rewards.append(episode_reward)
             self.episode_lengths.append(episode_length)
 
@@ -288,11 +229,12 @@ class MAPPOTrainer:
 
             # Save episode summary
             with open(os.path.join(episode_dir, "summary.txt"), "w") as f:
-                f.write(f"Episode {self.episodes_done}\n")
+                f.write(f"Episode {self.episodes_done} (Online Training)\n")
                 f.write(f"Total Reward: {episode_reward:.2f}\n")
                 f.write(f"Episode Length: {episode_length}\n")
                 f.write(f"Time: {time.perf_counter() - episode_time:.2f} seconds\n")
                 f.write(f"Cumulative Reward: {self.total_cumulative_reward:.2f}\n")
+                f.write("Policy updates per timestep: 1\n")
 
             self.episodes_done += 1
 
@@ -301,22 +243,24 @@ class MAPPOTrainer:
                 episode_time = time.perf_counter() - episode_time
                 avg_reward = np.mean(self.episode_rewards[-self.log_freq_episodes :])
                 avg_length = np.mean(self.episode_lengths[-self.log_freq_episodes :])
-                print(
+                print_colored(
                     f"Episode {self.episodes_done}/{self.total_training_episodes} | "
                     f"Episode Reward: {episode_reward:.2f} | "
                     f"Episode Length: {episode_length} | "
                     f"Avg. Reward: {avg_reward:.2f} | "
                     f"Avg. Length: {avg_length:.2f} | "
-                    f"Time for episode: {episode_time:.2f} seconds"
+                    f"Time for episode: {episode_time:.2f} seconds | "
+                    f"Online Updates: {episode_length}",
+                    "green"
                 )
 
             # Periodic evaluation
             if self.should_eval and self.episodes_done % self.eval_freq_episodes == 0:
                 eval_reward, eval_cumulative_rewards = self.evaluate()
-                self.eval_rewards.append(eval_reward)  # type: ignore
+                self.eval_rewards.append(eval_reward)
                 self.cumulative_eval_rewards.extend(eval_cumulative_rewards)
                 print_colored(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluation at episode {self.episodes_done}: {eval_reward:.2f}"
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Online Evaluation at episode {self.episodes_done}: {eval_reward:.2f}"
                 )
 
                 # Save evaluation results
@@ -355,19 +299,19 @@ class MAPPOTrainer:
 
         # Save training summary and cumulative rewards
         with open(os.path.join(self.experiment_dir, "training_summary.txt"), "w") as f:
-            f.write(f"Training completed after {self.episodes_done} episodes\n")
+            f.write(f"Online MAPPO Training completed after {self.episodes_done} episodes\n")
+            f.write("=" * 60 + "\n")
+            f.write("Training Mode: Online (policy update every timestep)\n")
+            f.write("Device: CPU only (no GPU/MPS acceleration)\n")
             f.write(f"Total episodes: {self.episodes_done}\n")
             f.write(f"Total timesteps: {self.timesteps_done}\n")
+            f.write(f"Policy updates: {self.timesteps_done} (one per timestep)\n")
             f.write(
                 f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes\n"
             )
             f.write(f"Best evaluation reward: {self.best_eval_reward:.2f}\n")
             f.write(f"Final cumulative reward: {self.total_cumulative_reward:.2f}\n")
             f.write("\n")
-
-            # Add model architecture information
-            model_architecture = get_model_architecture_summary(self.agent)
-            f.write(model_architecture)
 
             f.write("\nEpisode Rewards:\n")
             for i, reward in enumerate(self.episode_rewards):
@@ -388,8 +332,9 @@ class MAPPOTrainer:
             delimiter=";",
         )
 
-        print(
-            f"Training completed after {self.episodes_done} episodes ({self.episodes_done} episodes and {self.timesteps_done} timesteps)."
+        print_colored(
+            f"Online training completed after {self.episodes_done} episodes ({self.timesteps_done} timesteps, {self.timesteps_done} policy updates).",
+            "green"
         )
         print(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes")
 
@@ -400,12 +345,12 @@ class MAPPOTrainer:
         eval_rewards = []
         eval_cumulative_rewards = []
         print_colored(
-            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluating MAPPO agent for {self.eval_episodes} episodes...",
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluating online MAPPO agent for {self.eval_episodes} episodes...",
             "green",
         )
-        for _ in range(self.eval_episodes):
+        for ep in range(self.eval_episodes):
             print_colored(
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting evaluation episode {_ + 1}/{self.eval_episodes}",
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting evaluation episode {ep + 1}/{self.eval_episodes}",
                 "green",
             )
             obs, _ = self.env.reset()

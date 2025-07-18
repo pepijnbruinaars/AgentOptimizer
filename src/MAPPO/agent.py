@@ -16,15 +16,14 @@ class MAPPOAgent:
     def __init__(
         self,
         env,
-        hidden_size=64,
-        lr_actor=0.0003,
-        lr_critic=0.0003,
+        hidden_size=256,
+        lr_actor=0.0001,
+        lr_critic=0.0001,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_param=0.2,
-        batch_size=32,
-        num_epochs=5,
-        buffer_size=2048,
+        clip_param=0.1,
+        batch_size=32768,
+        num_epochs=10,
         device=None,
     ):
         self.env = env
@@ -65,7 +64,7 @@ class MAPPOAgent:
         self.critic = CriticNetwork(
             env.observation_space(first_agent.id),
             self.n_agents,
-            hidden_size=hidden_size,
+            hidden_size=2 * hidden_size,
             device=self.device,
         ).to(self.device)
 
@@ -200,8 +199,8 @@ class MAPPOAgent:
 
     def update_policy(self):
         """Update policy and value networks using PPO with GPU/MPS acceleration."""
-        # Skip if not enough data
-        if len(self.buffer["obs"]) < self.batch_size:
+        # Skip if no data available
+        if len(self.buffer["obs"]) == 0:
             return
 
         print_colored(

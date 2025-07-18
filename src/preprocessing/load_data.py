@@ -1,4 +1,3 @@
-from functools import partial
 import pandas as pd  # type: ignore
 import os
 
@@ -37,15 +36,36 @@ def load_data(config: dict[str, str]) -> pd.DataFrame:
     processed_df["resource"] = df[config["resource_id_col"]]
     processed_df["activity_name"] = df[config["activity_col"]]
 
-    # Convert to datetime format
-    processed_df[["start_timestamp", "end_timestamp"]] = df[
-        ["start_timestamp", "end_timestamp"]
-    ].apply(partial(pd.to_datetime, format="mixed"))
-    # Convert times to UTC
-    processed_df["start_timestamp"] = processed_df["start_timestamp"].dt.tz_convert(
-        "UTC"
+    # Convert to datetime format with flexible parsing for different formats
+    # Handle both formats: 2023-02-09T08:00:00.000 and 2019-03-25 08:00:00+00:00
+    processed_df["start_timestamp"] = pd.to_datetime(
+        df[config["start_timestamp_col"]],
+        format="mixed",
+        utc=False,  # Don't assume UTC to handle both timezone-aware and naive properly
     )
-    processed_df["end_timestamp"] = processed_df["end_timestamp"].dt.tz_convert("UTC")
+    processed_df["end_timestamp"] = pd.to_datetime(
+        df[config["end_timestamp_col"]], format="mixed", utc=False
+    )
+
+    # Handle timezone conversion properly
+    # If timestamps are timezone-naive, localize them to UTC first
+    # If they're already timezone-aware, convert to UTC
+    if processed_df["start_timestamp"].dt.tz is None:
+        # All timestamps are timezone-naive - localize to UTC
+        processed_df["start_timestamp"] = processed_df[
+            "start_timestamp"
+        ].dt.tz_localize("UTC")
+        processed_df["end_timestamp"] = processed_df["end_timestamp"].dt.tz_localize(
+            "UTC"
+        )
+    else:
+        # All timestamps are timezone-aware - convert to UTC
+        processed_df["start_timestamp"] = processed_df["start_timestamp"].dt.tz_convert(
+            "UTC"
+        )
+        processed_df["end_timestamp"] = processed_df["end_timestamp"].dt.tz_convert(
+            "UTC"
+        )
 
     return processed_df
 

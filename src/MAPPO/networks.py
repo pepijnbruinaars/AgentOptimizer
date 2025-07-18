@@ -27,12 +27,24 @@ class ActorNetwork(nn.Module):
         # Add reward history to input size
         input_size += 1  # For current reward
 
-        # Network layers
+        # Deeper network layers with dropout
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, hidden_size)
+        self.dropout = nn.Dropout(p=0.2)
         # Action head for discrete action space
         self.action_head = nn.Linear(hidden_size, action_space.n)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize network weights using Xavier initialization."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.normal_(module.bias, 0, 0.01)
 
     def forward(self, obs_dict, reward=None):
         # Process observation dictionary into a flat vector
@@ -68,10 +80,13 @@ class ActorNetwork(nn.Module):
 
         x = torch.cat(x_parts)
 
-        # Process through network
+        # Process through deeper network with dropout
         x = F.relu(self.fc1(x))
+        x = self.dropout(x)
         x = F.relu(self.fc2(x))
+        x = self.dropout(x)
         x = F.relu(self.fc3(x))
+        x = self.dropout(x)
         action_probs = F.softmax(self.action_head(x), dim=-1)
 
         return action_probs
@@ -112,10 +127,13 @@ class ActorNetwork(nn.Module):
         # Move entire batch to device at once
         x_batch = torch.stack(batch_inputs).to(current_device)
 
-        # Process through network (batch processing)
+        # Process through deeper network with dropout (batch processing)
         x = F.relu(self.fc1(x_batch))
+        x = self.dropout(x)
         x = F.relu(self.fc2(x))
+        x = self.dropout(x)
         x = F.relu(self.fc3(x))
+        x = self.dropout(x)
         action_probs = F.softmax(self.action_head(x), dim=-1)
 
         return action_probs
@@ -161,11 +179,23 @@ class CriticNetwork(nn.Module):
         # Total input size = single agent obs size * number of agents + reward
         input_size = single_agent_obs_size * n_agents + 1  # +1 for reward
 
-        # Network layers
+        # Deeper network layers with dropout
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, hidden_size)
+        self.dropout = nn.Dropout(p=0.2)
         self.value_head = nn.Linear(hidden_size, 1)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize network weights using Xavier initialization."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
     def forward(self, obs_dicts, reward=None):
         # Process and concatenate observations from all agents
@@ -210,10 +240,13 @@ class CriticNetwork(nn.Module):
         )
         x = torch.cat([x, reward_tensor])
 
-        # Process through network
+        # Process through deeper network with dropout
         x = F.relu(self.fc1(x))
+        x = self.dropout(x)
         x = F.relu(self.fc2(x))
+        x = self.dropout(x)
         x = F.relu(self.fc3(x))
+        x = self.dropout(x)
         value = self.value_head(x)
 
         return value
@@ -262,9 +295,11 @@ class CriticNetwork(nn.Module):
         # Move entire batch to device at once and process
         x_batch = torch.stack(batch_inputs).to(current_device)
 
-        # Process through network (batch processing)
+        # Process through deeper network with dropout (batch processing)
         x = F.relu(self.fc1(x_batch))
+        x = self.dropout(x)
         x = F.relu(self.fc2(x))
+        x = self.dropout(x)
         x = F.relu(self.fc3(x))
         values = self.value_head(x)
 
