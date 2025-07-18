@@ -37,68 +37,9 @@ from src.MAPPO.agent import MAPPOAgent
 from src.baselines import create_baseline_agents, BaselineEvaluator
 from src.config import config
 from src.display import print_colored
-from src.preprocessing.load_data import load_data, split_data
-from src.preprocessing.preprocessing import remove_short_cases
-
-
-def get_device():
-    """Get the best available device for PyTorch."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
-
-
-def load_trained_mappo_agent(env, model_path=None):
-    """
-    Load a trained MAPPO agent. If no model path provided, create a new one.
-
-    Args:
-        env: The environment
-        model_path: Path to saved MAPPO model (optional)
-
-    Returns:
-        MAPPOAgent instance
-    """
-    device = get_device()
-    print_colored(f"Using device: {device}", "yellow")
-
-    if model_path and os.path.exists(model_path):
-        print_colored(f"Loading trained MAPPO model from {model_path}", "green")
-        # Create agent with same config as training
-        mappo_agent = MAPPOAgent(
-            env=env,
-            hidden_size=64,
-            lr_actor=0.0003,
-            lr_critic=0.0003,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_param=0.2,
-            batch_size=1028,
-            num_epochs=5,
-            device=device,
-        )
-        # Load the trained weights
-        mappo_agent.load_models(model_path)
-        return mappo_agent
-    else:
-        print_colored("No trained model found, creating new MAPPO agent", "yellow")
-        # Create a new agent (this would need training first)
-        return MAPPOAgent(
-            env=env,
-            hidden_size=64,
-            lr_actor=0.0003,
-            lr_critic=0.0003,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_param=0.2,
-            batch_size=1028,
-            num_epochs=5,
-            device=device,
-        )
-
+# Import shared utilities to avoid code duplication
+sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+from src.utils import get_device, load_trained_mappo_agent
 
 def create_performance_data(env):
     """
@@ -208,7 +149,7 @@ def run_baseline_evaluation(args):
     # Load MAPPO agent if specified
     mappo_agent = None
     if args.include_mappo and args.model_path:
-        mappo_agent = load_trained_mappo_agent(env, args.model_path)
+        mappo_agent = load_trained_mappo_agent(env, args.model_path, create_new_if_missing=True)
 
     # Create evaluator
     evaluator = BaselineEvaluator(env)

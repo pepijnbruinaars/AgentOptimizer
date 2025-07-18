@@ -51,6 +51,8 @@ from src.config import config
 from src.display import print_colored
 from src.preprocessing.load_data import load_data, split_data
 from src.preprocessing.preprocessing import remove_short_cases
+# Import shared utilities to avoid code duplication
+from src.utils import get_device, load_trained_mappo_agent, load_trained_qmix_agent
 
 
 # Dataset configurations
@@ -425,61 +427,6 @@ class BaselineEvaluator:
         print_colored(f"Results saved to: {filepath}", "green")
 
 
-def get_device():
-    """Get the best available device for PyTorch."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
-
-
-def load_trained_mappo_agent(env, model_path=None):
-    """Load a trained MAPPO agent."""
-    device = get_device()
-    print_colored(f"Using device: {device}", "yellow")
-
-    if model_path and os.path.exists(model_path):
-        print_colored(f"Loading trained MAPPO model from {model_path}", "green")
-        mappo_agent = MAPPOAgent(
-            env=env,
-            hidden_size=64,
-            lr_actor=0.0003,
-            lr_critic=0.0003,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_param=0.2,
-            batch_size=1028,
-            num_epochs=5,
-            device=device,
-        )
-        mappo_agent.load_models(model_path)
-        return mappo_agent
-    else:
-        print_colored(
-            "No trained MAPPO model found, skipping MAPPO evaluation", "yellow"
-        )
-        return None
-
-
-def load_trained_qmix_agent(env, model_path=None):
-    """Load a trained QMIX agent."""
-    device = get_device()
-
-    if model_path and os.path.exists(model_path):
-        print_colored(f"Loading trained QMIX model from {model_path}", "green")
-        # Create QMIX agent - you may need to adjust parameters based on your implementation
-        qmix_agent = QMIXAgent(
-            env=env,
-            device=device,
-        )
-        qmix_agent.load_models(model_path)
-        return qmix_agent
-    else:
-        print_colored("No trained QMIX model found, skipping QMIX evaluation", "yellow")
-        return None
-
 
 def create_performance_data(env):
     """Create performance data for BestMedianAgent based on agent capabilities."""
@@ -611,7 +558,7 @@ def run_dataset_evaluation(dataset_name: str, args) -> Dict[str, Any]:
 
     # Load trained agents if requested
     if args.include_trained:
-        mappo_agent = load_trained_mappo_agent(env, args.mappo_model_path)
+        mappo_agent = load_trained_mappo_agent(env, args.mappo_model_path, create_new_if_missing=False)
         if mappo_agent:
             agent_configs.append((mappo_agent, "MAPPO Agent (Trained)"))
 
