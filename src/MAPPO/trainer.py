@@ -3,9 +3,10 @@ import os
 import time
 import torch
 from datetime import datetime
+from tqdm import tqdm
 
 from display import print_colored
-
+from trainers.base_trainer import TrainerLoggingMixin
 from .agent import MAPPOAgent
 
 
@@ -115,7 +116,7 @@ def map_action_probs_to_array(
     return array
 
 
-class MAPPOTrainer:
+class MAPPOTrainer(TrainerLoggingMixin):
     def __init__(
         self,
         env,
@@ -127,6 +128,8 @@ class MAPPOTrainer:
         eval_episodes=1,
         should_eval=True,
         experiment_dir="./experiments/mappo_default",
+        enable_tensorboard=True,
+        disable_progress=False,
     ):
         self.env = env
         self.agent = mappo_agent
@@ -156,9 +159,12 @@ class MAPPOTrainer:
         self.cumulative_eval_rewards: list[float] = []
         self.total_cumulative_reward = 0.0
 
+        # Initialize logging
+        self.setup_logging(experiment_dir, enable_tensorboard, disable_progress)
+
     def train(self) -> list[float]:
         """Main training loop for MAPPO."""
-        print(f"Starting MAPPO training for {self.total_training_episodes} episodes...")
+        tqdm.write(f"Starting MAPPO training for {self.total_training_episodes} episodes...")
 
         start_time = time.perf_counter()
 
@@ -173,6 +179,7 @@ class MAPPOTrainer:
             obs, _ = self.env.reset()
             episode_reward = 0.0  # Initialize as float
             episode_length = 0
+            self.log_episode_start(self.episodes_done)
             episode_time = time.perf_counter()
 
             # Arrays for storing episode data
@@ -228,6 +235,13 @@ class MAPPOTrainer:
                 # Update episode tracking
                 episode_reward += step_reward
                 episode_length += 1
+
+                # Log timestep progress
+                self.log_timestep(
+                    episode_length,
+                    step_reward=step_reward,
+                    cumulative_reward=self.total_cumulative_reward,
+                )
 
                 # Move to the next step
                 obs = next_obs
@@ -296,18 +310,36 @@ class MAPPOTrainer:
 
             self.episodes_done += 1
 
-            # Logging
+            # Log episode end with metrics
+            episode_time_elapsed = time.perf_counter() - episode_time
             if self.episodes_done % self.log_freq_episodes == 0:
-                episode_time = time.perf_counter() - episode_time
                 avg_reward = np.mean(self.episode_rewards[-self.log_freq_episodes :])
                 avg_length = np.mean(self.episode_lengths[-self.log_freq_episodes :])
-                print(
+            else:
+                avg_reward = np.mean(self.episode_rewards[-self.episodes_done :])
+                avg_length = np.mean(self.episode_lengths[-self.episodes_done :])
+
+            self.log_episode_end(
+                self.episodes_done - 1,
+                {
+                    "reward": episode_reward,
+                    "length": episode_length,
+                    "avg_reward": avg_reward,
+                    "avg_length": avg_length,
+                    "cumulative_reward": self.total_cumulative_reward,
+                    "time": episode_time_elapsed,
+                },
+            )
+
+            # Logging
+            if self.episodes_done % self.log_freq_episodes == 0:
+                tqdm.write(
                     f"Episode {self.episodes_done}/{self.total_training_episodes} | "
                     f"Episode Reward: {episode_reward:.2f} | "
                     f"Episode Length: {episode_length} | "
                     f"Avg. Reward: {avg_reward:.2f} | "
                     f"Avg. Length: {avg_length:.2f} | "
-                    f"Time for episode: {episode_time:.2f} seconds"
+                    f"Time for episode: {episode_time_elapsed:.2f} seconds"
                 )
 
             # Periodic evaluation
@@ -315,8 +347,17 @@ class MAPPOTrainer:
                 eval_reward, eval_cumulative_rewards = self.evaluate()
                 self.eval_rewards.append(eval_reward)  # type: ignore
                 self.cumulative_eval_rewards.extend(eval_cumulative_rewards)
-                print_colored(
+                tqdm.write(
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluation at episode {self.episodes_done}: {eval_reward:.2f}"
+                )
+
+                # Log evaluation metrics
+                self.log_evaluation(
+                    self.episodes_done,
+                    {
+                        "reward": eval_reward,
+                        "cumulative_reward": float(np.mean(eval_cumulative_rewards)),
+                    },
                 )
 
                 # Save evaluation results
@@ -337,7 +378,7 @@ class MAPPOTrainer:
                 if eval_reward > self.best_eval_reward:
                     self.best_eval_reward = eval_reward
                     self.agent.save_models(os.path.join(self.experiment_dir, "best"))
-                    print(f"New best model saved with reward: {eval_reward:.2f}")
+                    tqdm.write(f"New best model saved with reward: {eval_reward:.2f}")
 
             # Periodic saving (every few episodes)
             if self.episodes_done % self.save_freq_episodes == 0:
@@ -346,7 +387,7 @@ class MAPPOTrainer:
                         self.experiment_dir, f"checkpoint_{self.episodes_done}"
                     )
                 )
-                print_colored(
+                tqdm.write(
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checkpoint saved at episode {self.episodes_done}"
                 )
 
@@ -388,10 +429,13 @@ class MAPPOTrainer:
             delimiter=";",
         )
 
-        print(
+        tqdm.write(
             f"Training completed after {self.episodes_done} episodes ({self.episodes_done} episodes and {self.timesteps_done} timesteps)."
         )
-        print(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes")
+        tqdm.write(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes")
+
+        # Clean up logging resources
+        self.cleanup_logging()
 
         return self.episode_rewards
 

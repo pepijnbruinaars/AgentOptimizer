@@ -40,7 +40,7 @@ def get_device():
 
 
 def train_mappo(
-    env, experiment_dir: str, total_training_episodes=50, policy_update_epochs=2, online_training=False
+    env, experiment_dir: str, total_training_episodes=50, policy_update_epochs=2, online_training=False, enable_tensorboard=True, disable_progress=False
 ):
     """
     Train a MAPPO agent on the environment.
@@ -94,6 +94,8 @@ def train_mappo(
             should_eval=True,
             eval_episodes=3,
             experiment_dir=experiment_dir,
+            enable_tensorboard=enable_tensorboard,
+            disable_progress=disable_progress,
         )
     else:
         trainer = MAPPOTrainer(
@@ -103,6 +105,8 @@ def train_mappo(
             should_eval=True,  # Enable evaluation during training
             eval_episodes=3,  # Number of evaluation episodes
             experiment_dir=experiment_dir,
+            enable_tensorboard=enable_tensorboard,
+            disable_progress=disable_progress,
         )
 
     # Start training
@@ -340,7 +344,7 @@ def get_model_architecture_summary(agent) -> str:
     return "\n".join(summary)
 
 
-def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=32):
+def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=1028, enable_tensorboard=True, disable_progress=False):
     """
     Train a QMIX agent on the environment.
 
@@ -349,6 +353,8 @@ def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=
         experiment_dir: Directory to save training results
         total_training_episodes: Total number of training episodes to run
         batch_size: Batch size for training
+        enable_tensorboard: If True, enable TensorBoard logging
+        disable_progress: If True, disable progress bars
     """
 
     device = get_device()
@@ -375,6 +381,8 @@ def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=
         batch_size=batch_size,
         buffer_size=10000,
         target_update_interval=100,
+        enable_tensorboard=enable_tensorboard,
+        disable_progress=disable_progress,
     )
 
     # Start training
@@ -428,7 +436,9 @@ def main(args):
             train_env,
             experiment_dir,
             total_training_episodes=args.training_episodes,
-            batch_size=32,
+            batch_size=1028,
+            enable_tensorboard=args.tensorboard,
+            disable_progress=args.disable_progress,
         )
 
         # Save the trained agent
@@ -530,23 +540,41 @@ def main(args):
     )
 
     # Run one episode with random actions to verify environment
+    from utils.progress_manager import ProgressBarManager
+    from tqdm import tqdm
+
     observations, _ = test_env.reset()
     episode_reward = 0
     step_count = 0
+    cumulative_reward = 0
 
     print_colored("Running test episode with random actions...", "cyan")
+
+    # Initialize progress bar for test episode
+    pbar = ProgressBarManager(total_episodes=1, disable=False)
+    pbar.start_training()
+    pbar.start_episode(0)
+
     while True:
         actions = {agent.id: np.random.choice([0, 1]) for agent in test_env.agents}
         observations, rewards, terminations, truncations, _ = test_env.step(actions)
-        episode_reward += sum(rewards.values())
+        step_reward = sum(rewards.values())
+        episode_reward += step_reward
+        cumulative_reward += step_reward
         step_count += 1
+
+        # Update progress bar
+        pbar.update_timestep(step_reward=step_reward, cumulative_reward=cumulative_reward)
 
         if any(terminations.values()) or any(truncations.values()):
             break
 
-    print_colored(
-        f"Test episode completed: {step_count} steps, total reward: {episode_reward:.2f}",
-        "green",
+    # Finish progress bar
+    pbar.finish_episode()
+    pbar.finish_training()
+
+    tqdm.write(
+        f"Test episode completed: {step_count} steps, total reward: {episode_reward:.2f}"
     )
     test_env.close()
 
@@ -566,6 +594,8 @@ def main(args):
         total_training_episodes=args.training_episodes,  # Use configurable parameter
         policy_update_epochs=args.policy_epochs,  # Use configurable parameter
         online_training=args.online_training,  # Use online training flag
+        enable_tensorboard=args.tensorboard,  # TensorBoard logging (enabled by default)
+        disable_progress=args.disable_progress,  # Progress bars (enabled by default)
     )
 
     # Save the trained agent
@@ -674,6 +704,19 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Use online training mode (update policy at every timestep)",
+    )
+    parser.add_argument(
+        "--no-tensorboard",
+        action="store_false",
+        dest="tensorboard",
+        default=True,
+        help="Disable TensorBoard logging (enabled by default)",
+    )
+    parser.add_argument(
+        "--disable-progress",
+        action="store_true",
+        default=False,
+        help="Disable progress bars (useful for non-interactive environments)",
     )
 
     args = parser.parse_args()

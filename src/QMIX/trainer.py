@@ -6,17 +6,19 @@ import random
 import os
 import time
 from datetime import datetime
+from tqdm import tqdm
 
 from display import print_colored
+from trainers.base_trainer import TrainerLoggingMixin
 
 
-class QMIXTrainer:
+class QMIXTrainer(TrainerLoggingMixin):
     def __init__(
         self,
         env,
         agent,
         total_training_episodes=100,
-        batch_size=32,
+        batch_size=1028,
         buffer_size=10000,
         target_update_interval=100,
         eval_freq_episodes=10,
@@ -25,6 +27,8 @@ class QMIXTrainer:
         eval_episodes=3,
         should_eval=True,
         experiment_dir="./experiments/qmix_default",
+        enable_tensorboard=True,
+        disable_progress=False,
         **kwargs,
     ):
         self.env = env
@@ -61,11 +65,13 @@ class QMIXTrainer:
         self.cumulative_eval_rewards: list[float] = []
         self.total_cumulative_reward = 0.0
 
+        # Initialize logging
+        self.setup_logging(experiment_dir, enable_tensorboard, disable_progress)
+
     def train(self):
         """Main training loop for QMIX with comprehensive logging."""
-        print_colored(
-            f"Starting QMIX training for {self.total_training_episodes} episodes...",
-            "green",
+        tqdm.write(
+            f"Starting QMIX training for {self.total_training_episodes} episodes..."
         )
 
         start_time = time.perf_counter()
@@ -83,6 +89,7 @@ class QMIXTrainer:
             episode_reward = 0.0
             episode_length = 0
             episode_time = time.perf_counter()
+            self.log_episode_start(self.episodes_done)
             episode_loss = 0.0
             num_learning_steps = 0
 
@@ -97,9 +104,8 @@ class QMIXTrainer:
             while not done:
                 step_count += 1
                 if step_count % 100 == 0:  # Log every 100 steps
-                    print_colored(
-                        f"Episode {self.episodes_done}, Step {step_count}, Buffer size: {len(self.buffer)}",
-                        "yellow",
+                    tqdm.write(
+                        f"Episode {self.episodes_done}, Step {step_count}, Buffer size: {len(self.buffer)}"
                     )
 
                 # Select actions using the current policy
@@ -148,6 +154,13 @@ class QMIXTrainer:
                 episode_length += 1
                 self.timesteps_done += 1
 
+                # Log timestep progress
+                self.log_timestep(
+                    episode_length,
+                    step_reward=reward,
+                    cumulative_reward=self.total_cumulative_reward,
+                )
+
                 # Learn from experience
                 if len(self.buffer) >= self.batch_size:
                     loss = self.learn()
@@ -160,9 +173,7 @@ class QMIXTrainer:
             # Update target networks
             if self.episodes_done % self.target_update_interval == 0:
                 self.agent.update_target()
-                print_colored(
-                    f"Target networks updated at episode {self.episodes_done}", "cyan"
-                )
+                tqdm.write(f"Target networks updated at episode {self.episodes_done}")
 
             # Calculate average episode loss
             avg_episode_loss = episode_loss / max(1, num_learning_steps)
@@ -243,12 +254,34 @@ class QMIXTrainer:
 
             self.episodes_done += 1
 
-            # Logging
+            # Log episode end with metrics
             if self.episodes_done % self.log_freq_episodes == 0:
                 avg_reward = np.mean(self.episode_rewards[-self.log_freq_episodes :])
                 avg_length = np.mean(self.episode_lengths[-self.log_freq_episodes :])
                 avg_loss = np.mean(self.episode_losses[-self.log_freq_episodes :])
-                print_colored(
+            else:
+                avg_reward = np.mean(self.episode_rewards[-self.episodes_done :])
+                avg_length = np.mean(self.episode_lengths[-self.episodes_done :])
+                avg_loss = np.mean(self.episode_losses[-self.episodes_done :])
+
+            self.log_episode_end(
+                self.episodes_done - 1,
+                {
+                    "reward": episode_reward,
+                    "length": episode_length,
+                    "avg_reward": avg_reward,
+                    "avg_length": avg_length,
+                    "cumulative_reward": self.total_cumulative_reward,
+                    "time": episode_time_elapsed,
+                    "loss": avg_episode_loss,
+                    "epsilon": self.agent.epsilon,
+                    "buffer_size": len(self.buffer),
+                },
+            )
+
+            # Logging
+            if self.episodes_done % self.log_freq_episodes == 0:
+                tqdm.write(
                     f"Episode {self.episodes_done}/{self.total_training_episodes} | "
                     f"Episode Reward: {episode_reward:.2f} | "
                     f"Episode Length: {episode_length} | "
@@ -257,8 +290,7 @@ class QMIXTrainer:
                     f"Avg. Loss: {avg_loss:.6f} | "
                     f"Epsilon: {self.agent.epsilon:.4f} | "
                     f"Buffer: {len(self.buffer)} | "
-                    f"Time: {episode_time_elapsed:.2f}s",
-                    "blue",
+                    f"Time: {episode_time_elapsed:.2f}s"
                 )
 
             # Periodic evaluation
@@ -266,9 +298,17 @@ class QMIXTrainer:
                 eval_reward, eval_cumulative_rewards = self.evaluate()
                 self.eval_rewards.append(float(eval_reward))
                 self.cumulative_eval_rewards.extend(eval_cumulative_rewards)
-                print_colored(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluation at episode {self.episodes_done}: {eval_reward:.2f}",
-                    "green",
+                tqdm.write(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluation at episode {self.episodes_done}: {eval_reward:.2f}"
+                )
+
+                # Log evaluation metrics
+                self.log_evaluation(
+                    self.episodes_done,
+                    {
+                        "reward": eval_reward,
+                        "cumulative_reward": float(np.mean(eval_cumulative_rewards)),
+                    },
                 )
 
                 # Save evaluation results
@@ -291,8 +331,8 @@ class QMIXTrainer:
                     self.agent.save_models(
                         os.path.join(self.experiment_dir, "best.pth")
                     )
-                    print_colored(
-                        f"New best model saved with reward: {eval_reward:.2f}", "green"
+                    tqdm.write(
+                        f"New best model saved with reward: {eval_reward:.2f}"
                     )
 
             # Periodic saving (every few episodes)
@@ -301,9 +341,8 @@ class QMIXTrainer:
                     self.experiment_dir, f"checkpoint_{self.episodes_done}.pth"
                 )
                 self.agent.save_models(checkpoint_path)
-                print_colored(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checkpoint saved at episode {self.episodes_done}",
-                    "cyan",
+                tqdm.write(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checkpoint saved at episode {self.episodes_done}"
                 )
 
         # Save final model and training summary
@@ -325,16 +364,24 @@ class QMIXTrainer:
         )
 
         total_time = (time.perf_counter() - start_time) / 60
-        print_colored(
-            f"Training completed after {self.episodes_done} episodes ({self.timesteps_done} timesteps).",
-            "green",
+        tqdm.write(
+            f"Training completed after {self.episodes_done} episodes ({self.timesteps_done} timesteps)."
         )
-        print_colored(f"Total time: {total_time:.2f} minutes", "green")
+        tqdm.write(f"Total time: {total_time:.2f} minutes")
+
+        # Clean up logging resources
+        self.cleanup_logging()
 
         return self.episode_rewards
 
     def learn(self):
         """Learn from a batch of experiences and return the loss."""
+        # Set networks to training mode to enable dropout and batch norm updates
+        self.agent.agent_net.train()
+        self.agent.target_agent_net.train()
+        self.agent.mixing_net.train()
+        self.agent.target_mixing_net.train()
+
         if len(self.buffer) < self.batch_size:
             return None
 
@@ -356,21 +403,26 @@ class QMIXTrainer:
         reward_batch = torch.FloatTensor(reward_batch).to(self.agent.device)
         done_batch = torch.BoolTensor(done_batch).to(self.agent.device)
 
-        # Get current Q-values for all agents
-        current_q_values_list = []
-        for obs in obs_batch:
-            # Get Q-values for all agents
-            obs_arrays = []
-            for agent in self.env.agents:
-                flat_obs = self.agent._flatten_observation(obs[agent.id])
-                obs_arrays.append(flat_obs)
-            obs_tensor = torch.tensor(
-                np.stack(obs_arrays), dtype=torch.float32, device=self.agent.device
-            )
-            q_vals = self.agent.agent_net(obs_tensor)
-            current_q_values_list.append(q_vals)
-        current_q_values = torch.stack(
-            current_q_values_list
+        # Get current Q-values for all agents (batched)
+        # Prepare all observations at once for efficient GPU processing
+        batch_obs_tensor = self.agent.prepare_batch_observations(
+            obs_batch
+        )  # [batch_size, n_agents, obs_dim]
+
+        # Reshape to [batch_size * n_agents, obs_dim] for single forward pass
+        batch_size = batch_obs_tensor.shape[0]
+        n_agents = batch_obs_tensor.shape[1]
+        obs_dim = batch_obs_tensor.shape[2]
+
+        batch_obs_flat = batch_obs_tensor.reshape(batch_size * n_agents, obs_dim)
+        q_vals_flat = self.agent.agent_net(
+            batch_obs_flat
+        )  # [batch_size * n_agents, n_actions]
+
+        # Reshape back to [batch_size, n_agents, n_actions]
+        n_actions = q_vals_flat.shape[-1]
+        current_q_values = q_vals_flat.reshape(
+            batch_size, n_agents, n_actions
         )  # [batch_size, n_agents, n_actions]
 
         # Get Q-values for chosen actions
@@ -388,31 +440,29 @@ class QMIXTrainer:
             current_q_values, dim=2, index=chosen_actions.unsqueeze(2)
         ).squeeze(2)
 
-        # Get next Q-values for target network
-        target_q_values_list = []
-        for i, next_obs in enumerate(next_obs_batch):
-            if done_batch[i]:
-                # If episode is done, Q-value is 0
-                target_q_vals = torch.zeros(
-                    len(self.env.agents), self.agent.n_actions
-                ).to(self.agent.device)
-            else:
-                with torch.no_grad():
-                    obs_arrays = []
-                    for agent in self.env.agents:
-                        flat_obs = self.agent._flatten_observation(next_obs[agent.id])
-                        obs_arrays.append(flat_obs)
-                    obs_tensor = torch.tensor(
-                        np.stack(obs_arrays),
-                        dtype=torch.float32,
-                        device=self.agent.device,
-                    )
-                    target_q_vals = self.agent.target_agent_net(obs_tensor)
-            target_q_values_list.append(target_q_vals)
+        # Get next Q-values for target network (batched)
+        with torch.no_grad():
+            # Prepare all next observations at once for efficient GPU processing
+            batch_next_obs_tensor = self.agent.prepare_batch_observations(
+                next_obs_batch
+            )  # [batch_size, n_agents, obs_dim]
 
-        target_q_values = torch.stack(
-            target_q_values_list
-        )  # [batch_size, n_agents, n_actions]
+            # Reshape to [batch_size * n_agents, obs_dim] for single forward pass
+            batch_next_obs_flat = batch_next_obs_tensor.reshape(
+                batch_size * n_agents, obs_dim
+            )
+            target_q_vals_flat = self.agent.target_agent_net(
+                batch_next_obs_flat
+            )  # [batch_size * n_agents, n_actions]
+
+            # Reshape back to [batch_size, n_agents, n_actions]
+            target_q_values = target_q_vals_flat.reshape(
+                batch_size, n_agents, n_actions
+            )  # [batch_size, n_agents, n_actions]
+
+            # Zero out Q-values for done episodes
+            done_mask = done_batch.unsqueeze(-1).unsqueeze(-1)  # [batch_size, 1, 1]
+            target_q_values = target_q_values * (~done_mask)
         target_max_q_values = target_q_values.max(dim=2)[0]  # [batch_size, n_agents]
 
         # Convert states to tensors

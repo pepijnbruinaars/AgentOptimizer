@@ -187,6 +187,37 @@ class QMIXAgent:
                     obs_list.append(0.0)
         return np.array(obs_list)
 
+    def prepare_batch_observations(self, obs_batch):
+        """Prepare batch of observations for efficient GPU processing.
+
+        Converts a batch of observation dicts to a tensor in a single operation,
+        avoiding individual tensor creations and device transfers.
+
+        Args:
+            obs_batch: List of observation dicts, each with agent observations
+
+        Returns:
+            torch.Tensor of shape [batch_size, n_agents, obs_dim] on device
+        """
+        batch_size = len(obs_batch)
+        batch_obs_arrays = []
+
+        # Flatten all observations at once
+        for obs in obs_batch:
+            obs_arrays = []
+            for agent in self.env.agents:
+                flat_obs = self._flatten_observation(obs[agent.id])
+                obs_arrays.append(flat_obs)
+            # Stack all agents' observations for this sample
+            batch_obs_arrays.append(np.stack(obs_arrays))
+
+        # Create single tensor for entire batch and move to device once
+        batch_obs = np.stack(batch_obs_arrays)
+        batch_tensor = torch.tensor(
+            batch_obs, dtype=torch.float32, device=self.device
+        )
+        return batch_tensor  # Shape: [batch_size, n_agents, obs_dim]
+
     def select_actions(self, observations, deterministic=False):
         """Select actions for all agents with optional logging."""
         # Convert dictionary observations to flat arrays
@@ -197,6 +228,9 @@ class QMIXAgent:
 
         obs = np.stack(obs_arrays)
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
+
+        # Set network to evaluation mode to disable dropout during inference
+        self.agent_net.eval()
 
         with torch.no_grad():
             q_values = self.agent_net(obs)
@@ -272,6 +306,10 @@ class QMIXAgent:
 
         obs = np.stack(obs_arrays)
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
+
+        # Set network to evaluation mode to disable dropout during inference
+        self.agent_net.eval()
+
         return self.agent_net(obs)
 
     def get_global_state(self, observations):

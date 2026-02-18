@@ -153,11 +153,12 @@ class Case:
     def __init__(
         self,
         case_id: int,
-        assign_timestamp: pd.Timestamp,
+        open_timestamp: pd.Timestamp,
         tasks: List[Task],
     ) -> None:
         self.id: int = case_id
-        self.assigned_timestamp: pd.Timestamp = assign_timestamp
+        self.open_timestamp: pd.Timestamp = open_timestamp
+        self.assigned_timestamp: pd.Timestamp = open_timestamp
         self.start_timestamp: Optional[pd.Timestamp] = None
         self.completion_timestamp: Optional[pd.Timestamp] = None
         self.status: Status = Status.PENDING
@@ -206,6 +207,7 @@ class Case:
     def assign_to_agent(self, agent: "ResourceAgent", timestamp: pd.Timestamp) -> None:
         """Assign this case to an agent."""
         self.assigned_agent = agent
+        # Keep the latest assignment time separate from immutable case open time.
         self.assigned_timestamp = timestamp
         self.status = Status.OPEN
         # Get reference to environment through the agent

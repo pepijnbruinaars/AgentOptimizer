@@ -3,9 +3,10 @@ import os
 import time
 import torch
 from datetime import datetime
+from tqdm import tqdm
 
 from display import print_colored
-
+from trainers.base_trainer import TrainerLoggingMixin
 from .agent import MAPPOAgent
 
 
@@ -31,12 +32,12 @@ def map_action_probs_to_array(
     return array
 
 
-class MAPPOOnlineTrainer:
+class MAPPOOnlineTrainer(TrainerLoggingMixin):
     """
     Online MAPPO trainer that updates policies at every timestep.
     This version doesn't use GPU/MPS acceleration and runs entirely on CPU.
     """
-    
+
     def __init__(
         self,
         env,
@@ -48,6 +49,8 @@ class MAPPOOnlineTrainer:
         eval_episodes=1,
         should_eval=True,
         experiment_dir="./experiments/mappo_online_default",
+        enable_tensorboard=True,
+        disable_progress=False,
     ):
         self.env = env
         self.agent = mappo_agent
@@ -80,12 +83,15 @@ class MAPPOOnlineTrainer:
         # Force agent to use CPU only (no GPU/MPS acceleration)
         self.agent.device = torch.device("cpu")
         self.agent._move_models_to_cpu()
-        
+
         print_colored("Online MAPPO Trainer initialized - all computations on CPU", "blue")
+
+        # Initialize logging
+        self.setup_logging(experiment_dir, enable_tensorboard, disable_progress)
 
     def train(self) -> list[float]:
         """Main training loop for online MAPPO (policy updates at every timestep)."""
-        print(f"Starting online MAPPO training for {self.total_training_episodes} episodes...")
+        tqdm.write(f"Starting online MAPPO training for {self.total_training_episodes} episodes...")
         print_colored("Policy will be updated at every timestep", "yellow")
 
         start_time = time.perf_counter()
@@ -102,6 +108,7 @@ class MAPPOOnlineTrainer:
             episode_reward = 0.0
             episode_length = 0
             episode_time = time.perf_counter()
+            self.log_episode_start(self.episodes_done)
 
             # Arrays for storing episode data
             episode_actions: list[np.ndarray] = []
@@ -159,12 +166,19 @@ class MAPPOOnlineTrainer:
 
                 # ONLINE UPDATE: Update policy after every timestep
                 if len(self.agent.buffer["obs"]) >= 1:  # We have at least one experience
-                    self.agent.update_policy_online()
+                    self.agent.update_policy()
 
                 # Update episode tracking
                 episode_reward += step_reward
                 episode_length += 1
                 timestep_in_episode += 1
+
+                # Log timestep progress
+                self.log_timestep(
+                    timestep_in_episode,
+                    step_reward=step_reward,
+                    cumulative_reward=self.total_cumulative_reward,
+                )
 
                 # Move to the next step
                 obs = next_obs
@@ -172,9 +186,8 @@ class MAPPOOnlineTrainer:
 
                 # Log timestep progress occasionally
                 if timestep_in_episode % 50 == 0:
-                    print_colored(
-                        f"Episode {self.episodes_done+1} - Timestep {timestep_in_episode}, Reward: {step_reward:.2f}",
-                        "cyan"
+                    tqdm.write(
+                        f"Episode {self.episodes_done+1} - Timestep {timestep_in_episode}, Reward: {step_reward:.2f}"
                     )
 
             # Episode completed
@@ -238,20 +251,37 @@ class MAPPOOnlineTrainer:
 
             self.episodes_done += 1
 
-            # Logging
+            # Log episode end with metrics
+            episode_time_elapsed = time.perf_counter() - episode_time
             if self.episodes_done % self.log_freq_episodes == 0:
-                episode_time = time.perf_counter() - episode_time
                 avg_reward = np.mean(self.episode_rewards[-self.log_freq_episodes :])
                 avg_length = np.mean(self.episode_lengths[-self.log_freq_episodes :])
-                print_colored(
+            else:
+                avg_reward = np.mean(self.episode_rewards[-self.episodes_done :])
+                avg_length = np.mean(self.episode_lengths[-self.episodes_done :])
+
+            self.log_episode_end(
+                self.episodes_done - 1,
+                {
+                    "reward": episode_reward,
+                    "length": episode_length,
+                    "avg_reward": avg_reward,
+                    "avg_length": avg_length,
+                    "cumulative_reward": self.total_cumulative_reward,
+                    "time": episode_time_elapsed,
+                },
+            )
+
+            # Logging
+            if self.episodes_done % self.log_freq_episodes == 0:
+                tqdm.write(
                     f"Episode {self.episodes_done}/{self.total_training_episodes} | "
                     f"Episode Reward: {episode_reward:.2f} | "
                     f"Episode Length: {episode_length} | "
                     f"Avg. Reward: {avg_reward:.2f} | "
                     f"Avg. Length: {avg_length:.2f} | "
-                    f"Time for episode: {episode_time:.2f} seconds | "
-                    f"Online Updates: {episode_length}",
-                    "green"
+                    f"Time for episode: {episode_time_elapsed:.2f} seconds | "
+                    f"Online Updates: {episode_length}"
                 )
 
             # Periodic evaluation
@@ -259,8 +289,17 @@ class MAPPOOnlineTrainer:
                 eval_reward, eval_cumulative_rewards = self.evaluate()
                 self.eval_rewards.append(eval_reward)
                 self.cumulative_eval_rewards.extend(eval_cumulative_rewards)
-                print_colored(
+                tqdm.write(
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Online Evaluation at episode {self.episodes_done}: {eval_reward:.2f}"
+                )
+
+                # Log evaluation metrics
+                self.log_evaluation(
+                    self.episodes_done,
+                    {
+                        "reward": eval_reward,
+                        "cumulative_reward": float(np.mean(eval_cumulative_rewards)),
+                    },
                 )
 
                 # Save evaluation results
@@ -281,7 +320,7 @@ class MAPPOOnlineTrainer:
                 if eval_reward > self.best_eval_reward:
                     self.best_eval_reward = eval_reward
                     self.agent.save_models(os.path.join(self.experiment_dir, "best"))
-                    print(f"New best model saved with reward: {eval_reward:.2f}")
+                    tqdm.write(f"New best model saved with reward: {eval_reward:.2f}")
 
             # Periodic saving (every few episodes)
             if self.episodes_done % self.save_freq_episodes == 0:
@@ -290,7 +329,7 @@ class MAPPOOnlineTrainer:
                         self.experiment_dir, f"checkpoint_{self.episodes_done}"
                     )
                 )
-                print_colored(
+                tqdm.write(
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checkpoint saved at episode {self.episodes_done}"
                 )
 
@@ -332,11 +371,13 @@ class MAPPOOnlineTrainer:
             delimiter=";",
         )
 
-        print_colored(
-            f"Online training completed after {self.episodes_done} episodes ({self.timesteps_done} timesteps, {self.timesteps_done} policy updates).",
-            "green"
+        tqdm.write(
+            f"Online training completed after {self.episodes_done} episodes ({self.timesteps_done} timesteps, {self.timesteps_done} policy updates)."
         )
-        print(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes")
+        tqdm.write(f"Total time: {(time.perf_counter() - start_time) / 60:.2f} minutes")
+
+        # Clean up logging resources
+        self.cleanup_logging()
 
         return self.episode_rewards
 
