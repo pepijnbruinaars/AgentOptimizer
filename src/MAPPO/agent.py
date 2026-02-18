@@ -22,7 +22,7 @@ class MAPPOAgent:
         gamma=0.99,
         gae_lambda=0.95,
         clip_param=0.1,
-        batch_size=32768,
+        batch_size=1028,
         num_epochs=10,
         device=None,
     ):
@@ -102,6 +102,10 @@ class MAPPOAgent:
         # Ensure models are on CPU for inference during episode collection
         self._move_models_to_cpu()
 
+        # Set models to evaluation mode to disable dropout during inference
+        for actor in self.actors.values():
+            actor.eval()
+
         with torch.no_grad():
             for agent_id, obs in observations.items():
                 if agent_id in self.actors:
@@ -128,6 +132,9 @@ class MAPPOAgent:
 
         # Ensure critic is on CPU for inference during episode collection
         self._move_models_to_cpu()
+
+        # Set critic to evaluation mode to disable dropout during inference
+        self.critic.eval()
 
         with torch.no_grad():
             value = self.critic(
@@ -211,6 +218,11 @@ class MAPPOAgent:
 
         # Move models to device for training
         self._move_models_to_device()
+
+        # Set models to training mode to enable dropout and batch norm updates
+        for actor in self.actors.values():
+            actor.train()
+        self.critic.train()
 
         # Compute advantages and returns (using current device since models are now on GPU/MPS)
         self.compute_advantages_and_returns(use_current_device=True)

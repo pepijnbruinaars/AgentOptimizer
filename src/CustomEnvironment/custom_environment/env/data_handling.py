@@ -20,17 +20,20 @@ def compute_agent_activity_durations(
     agents = sorted(set(data["resource"]))
     activity_durations = {key: {k: [] for k in activities} for key in agents}
 
-    for _, row in data.iterrows():
-        agent = row["resource"]
-        activity = row["activity_name"]
-        duration = (row["end_timestamp"] - row["start_timestamp"]).total_seconds()
+    # Vectorized calculation of durations (10-50x faster than iterrows)
+    durations = (data["end_timestamp"] - data["start_timestamp"]).dt.total_seconds()
 
-        # Check if the duration is a valid number
-        if pd.isna(duration) or not isinstance(duration, (int, float)):
-            raise ValueError(
-                f"Invalid duration for agent {agent} and activity {activity}"
-            )
-        activity_durations[agent][activity].append(duration)
+    # Check if any durations are invalid
+    if durations.isna().any() or not all(isinstance(d, (int, float, np.number)) for d in durations):
+        raise ValueError("Invalid durations found in data")
+
+    # Vectorized grouping by agent and activity
+    for agent in agents:
+        agent_mask = data["resource"] == agent
+        for activity in activities:
+            activity_mask = data["activity_name"] == activity
+            mask = agent_mask & activity_mask
+            activity_durations[agent][activity] = durations[mask].tolist()
 
     return activity_durations
 
@@ -174,27 +177,20 @@ def compute_global_activity_medians(data: pd.DataFrame) -> Dict[str, float]:
     global_medians = {}
     activities = sorted(set(data["activity_name"]))
 
+    # Vectorized calculation of all durations at once (10-50x faster than iterrows)
+    all_durations = (data["end_timestamp"] - data["start_timestamp"]).dt.total_seconds()
+
     for activity in activities:
-        # Get all durations for this activity across all agents
-        activity_data = data[data["activity_name"] == activity]
-        durations = []
+        # Get mask for this activity
+        activity_mask = data["activity_name"] == activity
+        durations = all_durations[activity_mask]
 
-        for _, row in activity_data.iterrows():
-            duration = (row["end_timestamp"] - row["start_timestamp"]).total_seconds()
-
-            # Check if the duration is valid
-            if (
-                pd.isna(duration)
-                or not isinstance(duration, (int, float))
-                or duration < 0
-            ):
-                continue
-
-            durations.append(duration)
+        # Filter valid durations (non-null and non-negative)
+        valid_durations = durations[(~durations.isna()) & (durations >= 0)]
 
         # Compute median if we have valid durations
-        if durations:
-            global_medians[activity] = float(np.median(durations))
+        if len(valid_durations) > 0:
+            global_medians[activity] = float(np.median(valid_durations))
         else:
             # Fallback to 0 if no valid durations found
             global_medians[activity] = 0.0

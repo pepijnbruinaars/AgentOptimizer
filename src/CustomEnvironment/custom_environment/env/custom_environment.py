@@ -60,6 +60,11 @@ class AgentOptimizerEnvironment(ParallelEnv):
         current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         self.log_file: str = os.path.join(self.log_dir, f"log_{current_timestamp}.csv")
 
+        # CSV logging buffer - batch writes for performance
+        self.csv_buffer: list[list] = []
+        self.csv_buffer_size: int = 100  # Flush every 100 tasks
+        self.csv_header_written: bool = False
+
         # Total number of steps and epochs
         self.steps: int = 0
         self.epochs: int = 0
@@ -93,6 +98,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
             activity_durations_dict, stats_dict, global_activity_medians = (
                 pre_fitted_distributions
             )
+            self._use_pre_fitted = True
             print("Using pre-fitted duration distributions from training data")
         else:
             # Fit distributions on the current data (original behavior)
@@ -101,7 +107,13 @@ class AgentOptimizerEnvironment(ParallelEnv):
             )
             # Compute global historical medians for each activity (across all agents)
             global_activity_medians = compute_global_activity_medians(self.data)
+            self._use_pre_fitted = False
             print("Fitting duration distributions on current dataset")
+
+        # Cache distributions for reuse in reset() - avoid refitting every episode
+        self._cached_activity_durations_dict = activity_durations_dict
+        self._cached_stats_dict = stats_dict
+        self._cached_global_activity_medians = global_activity_medians
 
         # Store global activity medians
         self.global_activity_medians = global_activity_medians
@@ -189,14 +201,10 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
     def _filter_completed_cases(self) -> None:
         """Filter out completed cases from pending_cases and move them to completed_cases."""
-        i = 0
-        while i < len(self.pending_cases):
-            case = self.pending_cases[i]
-            if case.status == Status.COMPLETED:
-                self.completed_cases.append(case)
-                self.pending_cases.pop(i)
-            else:
-                i += 1
+        # Separate completed and pending cases using list comprehension (more efficient than pop)
+        completed = [case for case in self.pending_cases if case.status == Status.COMPLETED]
+        self.pending_cases = [case for case in self.pending_cases if case.status != Status.COMPLETED]
+        self.completed_cases.extend(completed)
 
         debug_print_colored(
             f"Completed: {len(self.completed_cases)}, remaining: {len(self.pending_cases)}"
@@ -231,6 +239,40 @@ class AgentOptimizerEnvironment(ParallelEnv):
         if self._find_unhandled_pending_case(at_time) is not None:
             return True
         return bool(self.future_cases and self.future_cases[0].open_timestamp <= at_time)
+
+    def _flush_csv_buffer(self, force: bool = False) -> None:
+        """Flush accumulated CSV data to file if buffer is full or forced."""
+        if len(self.csv_buffer) < self.csv_buffer_size and not force:
+            return
+
+        if len(self.csv_buffer) == 0:
+            return
+
+        # Create DataFrame from buffer
+        csv_df = pd.DataFrame(
+            self.csv_buffer,
+            columns=[
+                "case_id",
+                "case_nr_tasks",
+                "case_open_time",
+                "case_completed_time",
+                "task_id",
+                "task_assigned_time",
+                "task_started_time",
+                "task_completed_time",
+                "task_agent_id",
+            ],
+        )
+
+        # Write to file (write header only on first write)
+        csv_df.to_csv(
+            self.log_file,
+            mode="a",
+            header=not self.csv_header_written,
+            index=False,
+        )
+        self.csv_header_written = True
+        self.csv_buffer.clear()
 
     def step(self, actions: dict[int, int]) -> tuple[dict, dict, dict, dict, dict]:
         """Execute one step of the environment's dynamics."""
@@ -278,18 +320,18 @@ class AgentOptimizerEnvironment(ParallelEnv):
             # Reset upcoming_case to None after assignment to prevent duplicates
             self.upcoming_case = None
 
-        # Check if any two agents have the same current_case
+        # Check if any two agents have the same current_case (optimized with set-based lookup)
+        # This should never happen if assignment logic is correct, but kept for safety
+        active_cases = {}
         for agent in self.agents:
             if agent.current_case is not None:
-                for other_agent in self.agents:
-                    if (
-                        agent.id != other_agent.id
-                        and agent.current_case == other_agent.current_case
-                    ):
-                        debug_print_colored(
-                            f"Conflict between agents {agent.id} and {other_agent.id}",
-                            "red",
-                        )
+                if agent.current_case in active_cases:
+                    debug_print_colored(
+                        f"Conflict between agents {agent.id} and {active_cases[agent.current_case]}",
+                        "red",
+                    )
+                else:
+                    active_cases[agent.current_case] = agent.id
 
         ### ------------------------------- ###
         ### CHECK COMPLETED TASKS/CASES     ###
@@ -302,40 +344,23 @@ class AgentOptimizerEnvironment(ParallelEnv):
             if is_finished and finished_case:
                 if finished_case.current_task:
                     self.completed_task = finished_case.current_task
-                # If the case is finished, add all its tasks to the CSV
+                # If the case is finished, add all its tasks to the CSV buffer
                 for task in finished_case.all_tasks:
-                    finished_case_df = pd.DataFrame(
-                        columns=[
-                            "case_id",
-                            "case_nr_tasks",
-                            "case_open_time",
-                            "case_completed_time",
-                            "task_id",
-                            "task_assigned_time",
-                            "task_started_time",
-                            "task_completed_time",
-                            "task_agent_id",
-                        ],
-                        data=[
-                            [
-                                finished_case.id,
-                                len(finished_case.all_tasks),
-                                finished_case.open_timestamp,
-                                finished_case.completion_timestamp,
-                                task.id,
-                                task.assigned_timestamp,
-                                task.start_timestamp,
-                                task.completion_timestamp,
-                                task.assigned_agent.id,  # type: ignore
-                            ]
-                        ],
+                    self.csv_buffer.append(
+                        [
+                            finished_case.id,
+                            len(finished_case.all_tasks),
+                            finished_case.open_timestamp,
+                            finished_case.completion_timestamp,
+                            task.id,
+                            task.assigned_timestamp,
+                            task.start_timestamp,
+                            task.completion_timestamp,
+                            task.assigned_agent.id,  # type: ignore
+                        ]
                     )
-                    finished_case_df.to_csv(
-                        self.log_file,
-                        mode="a",
-                        header=not os.path.exists(self.log_file),
-                        index=False,
-                    )
+                # Flush buffer if it gets large
+                self._flush_csv_buffer()
             if agent.busy_until and agent.busy_until <= self.current_time:
                 agent.busy_until = None
 
@@ -396,51 +421,47 @@ class AgentOptimizerEnvironment(ParallelEnv):
         return observations, rewards, terminations, truncations, {}
 
     def _get_observations(self, agent: ResourceAgent):
-        # Fill with -1, and the keys for the capabilities
+        # Get the upcoming task ID
         task_id = (
             self.upcoming_case.current_task.id
             if self.upcoming_case and self.upcoming_case.current_task
             else -1
         )
 
+        # Build task queue - pre-allocate array
         task_queue = np.zeros(MAX_TASKS_PER_AGENT, dtype=np.int32)
-
-        for i in range(min(agent.case_queue.size(), MAX_TASKS_PER_AGENT)):
+        queue_size = min(agent.case_queue.size(), MAX_TASKS_PER_AGENT)
+        for i in range(queue_size):
             case = agent.case_queue.peek(i)
             if case:
                 task_queue[i] = case.id
+
+        # Check if agent can perform the task
         agent_can_perform_task = (
-            task_id in agent.capabilities.keys()
+            task_id >= 0
+            and task_id in agent.capabilities
             and agent.capabilities[task_id] is not None
         )
-        # Lookup value from task dict which goes from str to int
-        task_name = None
-        if task_id > -1:
+
+        # Get task stats (cached lookup)
+        task_stats = None
+        if agent_can_perform_task and task_id >= 0:
             task_name = self.inv_task_dict[task_id]
+            task_stats = agent.stats_dict.get(task_name)
+
+        # Build observation dict with cached values
         return {
             "task_id": task_id,
             "task_duration_left": agent.task_duration(self.current_time),
             "agents_task_queue": task_queue,
             "upcoming_task_mean": (
-                agent.stats_dict[task_name]["mean"]
-                if task_name is not None
-                and agent_can_perform_task
-                and agent.stats_dict[task_name] is not None
-                else -1
+                task_stats["mean"] if task_stats else -1
             ),
             "upcoming_task_median": (
-                agent.stats_dict[task_name]["median"]
-                if task_name is not None
-                and agent_can_perform_task
-                and agent.stats_dict[task_name] is not None
-                else -1
+                task_stats["median"] if task_stats else -1
             ),
             "upcoming_task_std": (
-                agent.stats_dict[task_name]["std"]
-                if task_name is not None
-                and agent_can_perform_task
-                and agent.stats_dict[task_name] is not None
-                else -1
+                task_stats["std"] if task_stats else -1
             ),
             "agent_is_capable_of_upcoming_task": np.array(
                 [int(agent_can_perform_task)], dtype=np.int8
@@ -517,6 +538,9 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
     def reset(self, seed: int | None = None, options=None) -> tuple[dict, dict]:
         """Resets the environment to its initial state."""
+        # Flush any remaining buffered CSV data from the previous episode
+        self._flush_csv_buffer(force=True)
+
         self.steps = 0
         self.epochs += 1
         self.current_time = self.data["start_timestamp"].min()
@@ -526,13 +550,15 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.upcoming_case = None
         current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = os.path.join(self.log_dir, f"log_{current_timestamp}.csv")
+        self.csv_buffer.clear()
+        self.csv_header_written = False
 
-        # Refit distributions for each agent and activity
-        activity_durations_dict, stats_dict = (
-            compute_activity_duration_distribution_per_agent(self.data)
-        )
+        # Reuse cached distributions instead of refitting every episode (major speedup)
+        # Distributions remain constant across episodes, so caching is safe
+        activity_durations_dict = self._cached_activity_durations_dict
+        stats_dict = self._cached_stats_dict
 
-        # Update agent capabilities with new distributions
+        # Update agent capabilities with cached distributions
         for agent in self.agents:
             resource = self.resources[agent.id]
             agent.capabilities = {
