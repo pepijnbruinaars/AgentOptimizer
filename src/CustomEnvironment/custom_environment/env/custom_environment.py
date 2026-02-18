@@ -161,12 +161,14 @@ class AgentOptimizerEnvironment(ParallelEnv):
         """Function that initializes the future cases with the first event of each case in the data."""
         future_cases: list[Case] = []
         # Group the data by case_id, and iterate over each case
-        grouped_and_sorted = self.data.sort_values("start_timestamp").groupby("case_id")
+        grouped_and_sorted = self.data.sort_values(
+            ["start_timestamp", "end_timestamp"]
+        ).groupby("case_id", sort=False)
         for case_id, case_data in grouped_and_sorted:
+            ordered_case_data = case_data.sort_values(["start_timestamp", "end_timestamp"])
             # Start timestamp of a case is the earliest timestamp of the case
-            start_timestamp = case_data["start_timestamp"].min()
-            future_tasks = case_data["activity_name"].tolist()
-            future_tasks.sort(key=lambda x: self.task_dict[x])
+            start_timestamp = ordered_case_data["start_timestamp"].min()
+            future_tasks = ordered_case_data["activity_name"].tolist()
             case = Case(
                 int(str(case_id)),
                 start_timestamp,
@@ -181,7 +183,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
             future_cases.append(case)
 
-        future_cases.sort(key=lambda x: x.assigned_timestamp)
+        future_cases.sort(key=lambda x: x.open_timestamp)
 
         return future_cases
 
@@ -204,6 +206,32 @@ class AgentOptimizerEnvironment(ParallelEnv):
         else:
             debug_print_colored("No remaining cases")
 
+    def _get_handled_cases(self) -> set[Case]:
+        """Collect all cases currently handled by agents or queued for them."""
+        handled_cases: set[Case] = set()
+        for agent in self.agents:
+            if agent.current_case:
+                handled_cases.add(agent.current_case)
+            for i in range(agent.case_queue.size()):
+                case = agent.case_queue.peek(i)
+                if case:
+                    handled_cases.add(case)
+        return handled_cases
+
+    def _find_unhandled_pending_case(self, at_time: pd.Timestamp) -> Case | None:
+        """Find the next pending case that is ready and not already handled."""
+        handled_cases = self._get_handled_cases()
+        for case in self.pending_cases:
+            if case not in handled_cases and case.is_eligible_for_next_task(at_time):
+                return case
+        return None
+
+    def _has_immediate_assignment_work(self, at_time: pd.Timestamp) -> bool:
+        """Check if there is assignment work to do without advancing simulation time."""
+        if self._find_unhandled_pending_case(at_time) is not None:
+            return True
+        return bool(self.future_cases and self.future_cases[0].open_timestamp <= at_time)
+
     def step(self, actions: dict[int, int]) -> tuple[dict, dict, dict, dict, dict]:
         """Execute one step of the environment's dynamics."""
         self.steps += 1
@@ -215,27 +243,30 @@ class AgentOptimizerEnvironment(ParallelEnv):
             self.upcoming_case is not None
             and self.upcoming_case.current_task is not None
         ):
+            task_id = self.upcoming_case.current_task.id
             # Check which agents volunteered for the task
             available_agents = [
-                agent_id for agent_id, action in actions.items() if action == 1
+                agent_id
+                for agent_id, action in actions.items()
+                if action == 1
             ]
 
             # Filter available agents to only those who can perform the task
             available_agents = [
                 agent_id
                 for agent_id in available_agents
-                if self.agents[agent_id].can_perform_task(
-                    self.upcoming_case.current_task.id
-                )
+                if self.agents[agent_id].can_perform_task(task_id)
             ]
 
             # If nobody volunteered, select all capable agents as available
             if not available_agents:
                 available_agents = [
-                    agent.id
-                    for agent in self.agents
-                    if agent.can_perform_task(self.upcoming_case.current_task.id)
+                    agent.id for agent in self.agents if agent.can_perform_task(task_id)
                 ]
+            if not available_agents:
+                raise ValueError(
+                    f"No capable agents found for task {task_id} in case {self.upcoming_case.id}."
+                )
 
             # Select a random agent from volunteers
             selected_agent_id = np.random.choice(available_agents)
@@ -289,7 +320,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
                             [
                                 finished_case.id,
                                 len(finished_case.all_tasks),
-                                finished_case.assigned_timestamp,
+                                finished_case.open_timestamp,
                                 finished_case.completion_timestamp,
                                 task.id,
                                 task.assigned_timestamp,
@@ -342,29 +373,15 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
         self.upcoming_case = None
 
-        # Check if there are any pending cases that are not already being handled by agents
-        if self.pending_cases:
-            # Create a set of cases already being handled by any agent
-            handled_cases = set()
-            for agent in self.agents:
-                if agent.current_case:
-                    handled_cases.add(agent.current_case)
-                for i in range(agent.case_queue.size()):
-                    # Peek at cases in the queue without removing them
-                    case = agent.case_queue.peek(i)
-                    if case:
-                        handled_cases.add(case)
+        # First prefer pending work that can be assigned immediately.
+        self.upcoming_case = self._find_unhandled_pending_case(self.current_time)
 
-            # Find first pending case that is ready to be worked on and not already handled
-            for case in self.pending_cases:
-                if case not in handled_cases and case.is_eligible_for_next_task(
-                    self.current_time
-                ):
-                    self.upcoming_case = case
-                    break
-
-        # If no pending cases, check if there are future cases
-        if self.upcoming_case is None and self.future_cases:
+        # Otherwise, bring in the next arrived future case.
+        if (
+            self.upcoming_case is None
+            and self.future_cases
+            and self.future_cases[0].open_timestamp <= self.current_time
+        ):
             # Assign the next future case to the upcoming case
             self.upcoming_case = self.future_cases.pop(0)
             self.pending_cases.append(self.upcoming_case)
@@ -442,7 +459,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         if len(self.pending_cases) > 5:
             print("  ...")
         if self.future_cases:
-            print(f"  Next arrival: {self.future_cases[0].assigned_timestamp}")
+            print(f"  Next arrival: {self.future_cases[0].open_timestamp}")
         display_indented_list(
             self.future_cases[:5], f"Future Cases ({len(self.future_cases)})"
         )
@@ -542,6 +559,9 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
     def _get_next_time(self) -> pd.Timestamp:
         """Get the next time where action is needed."""
+        if self._has_immediate_assignment_work(self.current_time):
+            return self.current_time
+
         # Find next event time (either a task completion or new case arrival)
         next_event_times: list[pd.Timestamp] = []
 
@@ -566,7 +586,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         # Add next case arrival time from future cases
         if len(self.future_cases) > 0:
             # Only add the arrival time if it's in the future
-            arrival_time = self.future_cases[0].assigned_timestamp
+            arrival_time = self.future_cases[0].open_timestamp
             if arrival_time > self.current_time:
                 next_event_times.append(arrival_time)
 
@@ -574,7 +594,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         if next_event_times:
             next_time = min(next_event_times)
             # Safety check: ensure we always move forward in time
-            if next_time <= self.current_time:
+            if next_time < self.current_time:
                 debug_print_colored(
                     "⚠️ Time not progressing. Forcing small time increment.",
                     "red",
