@@ -139,7 +139,7 @@ class ActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, obs_space, n_agents, hidden_size=256, device=None):
+    def __init__(self, obs_space, n_agents, hidden_size=128, device=None):
         super(CriticNetwork, self).__init__()
         self.device = device if device is not None else torch.device("cpu")
         self.n_agents = n_agents

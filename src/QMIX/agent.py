@@ -9,7 +9,7 @@ from display import print_colored
 
 
 class AgentNetwork(nn.Module):
-    def __init__(self, obs_dim, n_actions, hidden_dim=64):
+    def __init__(self, obs_dim, n_actions, hidden_dim=32):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
@@ -24,7 +24,7 @@ class AgentNetwork(nn.Module):
 
 
 class MixingNetwork(nn.Module):
-    def __init__(self, n_agents, state_dim, hidden_dim=32):
+    def __init__(self, n_agents, state_dim, hidden_dim=16):
         super().__init__()
         self.n_agents = n_agents
         self.state_dim = state_dim
@@ -113,16 +113,22 @@ class QMIXAgent:
         )
 
         self.n_actions = n_actions or env.action_space(env.agents[0]).n
+        self.agent_hidden_dim = kwargs.get("agent_hidden_dim", 32)
+        self.mixing_hidden_dim = kwargs.get("mixing_hidden_dim", 16)
 
         # Create networks
-        self.agent_net = AgentNetwork(self.obs_dim, self.n_actions).to(self.device)
-        self.target_agent_net = AgentNetwork(self.obs_dim, self.n_actions).to(
-            self.device
-        )
-        self.mixing_net = MixingNetwork(self.n_agents, self.state_dim).to(self.device)
-        self.target_mixing_net = MixingNetwork(self.n_agents, self.state_dim).to(
-            self.device
-        )
+        self.agent_net = AgentNetwork(
+            self.obs_dim, self.n_actions, hidden_dim=self.agent_hidden_dim
+        ).to(self.device)
+        self.target_agent_net = AgentNetwork(
+            self.obs_dim, self.n_actions, hidden_dim=self.agent_hidden_dim
+        ).to(self.device)
+        self.mixing_net = MixingNetwork(
+            self.n_agents, self.state_dim, hidden_dim=self.mixing_hidden_dim
+        ).to(self.device)
+        self.target_mixing_net = MixingNetwork(
+            self.n_agents, self.state_dim, hidden_dim=self.mixing_hidden_dim
+        ).to(self.device)
 
         # Setup optimizer
         self.optimizer = optim.Adam(
@@ -145,6 +151,8 @@ class QMIXAgent:
         print_colored(f"  Observation dim: {self.obs_dim}", "cyan")
         print_colored(f"  State dim: {self.state_dim}", "cyan")
         print_colored(f"  Actions: {self.n_actions}", "cyan")
+        print_colored(f"  Agent hidden dim: {self.agent_hidden_dim}", "cyan")
+        print_colored(f"  Mixing hidden dim: {self.mixing_hidden_dim}", "cyan")
         print_colored(f"  Learning rate: {kwargs.get('lr', 0.0005)}", "cyan")
         print_colored(f"  Gamma: {self.gamma}", "cyan")
         print_colored(f"  Initial epsilon: {self.epsilon}", "cyan")

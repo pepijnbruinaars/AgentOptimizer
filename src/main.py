@@ -29,6 +29,11 @@ from QMIX.trainer import QMIXTrainer
 import env_config
 from analysis.plot_distributions import plot_log_metrics
 
+DEFAULT_MAPPO_HIDDEN_SIZE = 128
+DEFAULT_MAPPO_CRITIC_HIDDEN_SIZE = 128
+DEFAULT_QMIX_AGENT_HIDDEN_DIM = 32
+DEFAULT_QMIX_MIXING_HIDDEN_DIM = 16
+
 
 def get_device():
     if torch.cuda.is_available():
@@ -51,6 +56,8 @@ def train_mappo(
     experiment_dir: str,
     total_training_episodes=50,
     policy_update_epochs=2,
+    mappo_hidden_size=DEFAULT_MAPPO_HIDDEN_SIZE,
+    mappo_critic_hidden_size=DEFAULT_MAPPO_CRITIC_HIDDEN_SIZE,
     online_training=False,
     eval_freq_episodes=5,
     eval_episodes=1,
@@ -91,7 +98,8 @@ def train_mappo(
     # Initialize MAPPO agent with device
     mappo_agent = MAPPOAgent(
         env,
-        hidden_size=256,
+        hidden_size=mappo_hidden_size,
+        critic_hidden_size=mappo_critic_hidden_size,
         lr_actor=0.0003,
         lr_critic=0.0003,
         gamma=0.99,
@@ -179,7 +187,13 @@ def evaluate_agent(env, agent, episodes=10, output_dir=None):
     return avg_reward
 
 
-def evaluate_baselines(env, model_path=None, num_episodes=100):
+def evaluate_baselines(
+    env,
+    model_path=None,
+    num_episodes=100,
+    mappo_hidden_size=DEFAULT_MAPPO_HIDDEN_SIZE,
+    mappo_critic_hidden_size=DEFAULT_MAPPO_CRITIC_HIDDEN_SIZE,
+):
     """
     Evaluate baseline agents against trained MAPPO agent.
 
@@ -217,7 +231,8 @@ def evaluate_baselines(env, model_path=None, num_episodes=100):
         print_colored(f"Loading trained MAPPO model from {model_path}", "green")
         mappo_agent = MAPPOAgent(
             env=env,
-            hidden_size=256,
+            hidden_size=mappo_hidden_size,
+            critic_hidden_size=mappo_critic_hidden_size,
             lr_actor=0.0003,
             lr_critic=0.0003,
             gamma=0.99,
@@ -235,7 +250,8 @@ def evaluate_baselines(env, model_path=None, num_episodes=100):
         )
         mappo_agent = MAPPOAgent(
             env=env,
-            hidden_size=256,
+            hidden_size=mappo_hidden_size,
+            critic_hidden_size=mappo_critic_hidden_size,
             lr_actor=0.0003,
             lr_critic=0.0003,
             gamma=0.99,
@@ -366,6 +382,8 @@ def train_qmix(
     experiment_dir: str,
     total_training_episodes=50,
     batch_size=1028,
+    qmix_agent_hidden_dim=DEFAULT_QMIX_AGENT_HIDDEN_DIM,
+    qmix_mixing_hidden_dim=DEFAULT_QMIX_MIXING_HIDDEN_DIM,
     eval_freq_episodes=5,
     eval_episodes=1,
     enable_tensorboard=True,
@@ -396,6 +414,8 @@ def train_qmix(
     qmix_agent = QMIXAgent(
         env,
         device=device,
+        agent_hidden_dim=qmix_agent_hidden_dim,
+        mixing_hidden_dim=qmix_mixing_hidden_dim,
         lr=0.0005,
         gamma=0.99,
         epsilon=0.1,
@@ -467,6 +487,8 @@ def main(args):
             experiment_dir,
             total_training_episodes=args.training_episodes,
             batch_size=1028,
+            qmix_agent_hidden_dim=args.qmix_agent_hidden_dim,
+            qmix_mixing_hidden_dim=args.qmix_mixing_hidden_dim,
             eval_freq_episodes=args.train_eval_freq,
             eval_episodes=args.train_eval_episodes,
             enable_tensorboard=args.tensorboard,
@@ -625,6 +647,8 @@ def main(args):
         experiment_dir,
         total_training_episodes=args.training_episodes,  # Use configurable parameter
         policy_update_epochs=args.policy_epochs,  # Use configurable parameter
+        mappo_hidden_size=args.mappo_hidden_size,
+        mappo_critic_hidden_size=args.mappo_critic_hidden_size,
         online_training=args.online_training,  # Use online training flag
         eval_freq_episodes=args.train_eval_freq,
         eval_episodes=args.train_eval_episodes,
@@ -661,6 +685,8 @@ def main(args):
         f.write("=" * 25 + "\n")
         f.write(f"Training episodes: {args.training_episodes}\n")
         f.write(f"Policy update epochs per episode: {args.policy_epochs}\n")
+        f.write(f"MAPPO actor hidden size: {args.mappo_hidden_size}\n")
+        f.write(f"MAPPO critic hidden size: {args.mappo_critic_hidden_size}\n")
         f.write("Final evaluation episodes: 10\n")
         f.write(f"Average test reward: {avg_reward:.2f}\n")
         f.write(f"Model saved at: {model_path}\n")
@@ -726,6 +752,30 @@ if __name__ == "__main__":
         type=int,
         default=5,
         help="Number of policy update epochs per training episode",
+    )
+    parser.add_argument(
+        "--mappo-hidden-size",
+        type=int,
+        default=DEFAULT_MAPPO_HIDDEN_SIZE,
+        help="Hidden layer width for MAPPO actor networks",
+    )
+    parser.add_argument(
+        "--mappo-critic-hidden-size",
+        type=int,
+        default=DEFAULT_MAPPO_CRITIC_HIDDEN_SIZE,
+        help="Hidden layer width for MAPPO critic network",
+    )
+    parser.add_argument(
+        "--qmix-agent-hidden-dim",
+        type=int,
+        default=DEFAULT_QMIX_AGENT_HIDDEN_DIM,
+        help="Hidden layer width for QMIX per-agent Q-network",
+    )
+    parser.add_argument(
+        "--qmix-mixing-hidden-dim",
+        type=int,
+        default=DEFAULT_QMIX_MIXING_HIDDEN_DIM,
+        help="Hidden layer width for QMIX mixing network",
     )
     parser.add_argument(
         "--train-eval-freq",
@@ -813,7 +863,12 @@ if __name__ == "__main__":
 
         # Load trained agent with device
         device = get_device()
-        agent = MAPPOAgent(env, device=device)
+        agent = MAPPOAgent(
+            env,
+            hidden_size=args.mappo_hidden_size,
+            critic_hidden_size=args.mappo_critic_hidden_size,
+            device=device,
+        )
         agent.load_models(args.model_path)
 
         # Evaluate the agent and save logs
@@ -837,6 +892,8 @@ if __name__ == "__main__":
             env,
             model_path=args.model_path if os.path.exists(args.model_path) else None,
             num_episodes=10,
+            mappo_hidden_size=args.mappo_hidden_size,
+            mappo_critic_hidden_size=args.mappo_critic_hidden_size,
         )
 
         env.close()
@@ -877,6 +934,8 @@ if __name__ == "__main__":
             env,
             model_path=args.model_path if os.path.exists(args.model_path) else None,
             num_episodes=100,
+            mappo_hidden_size=args.mappo_hidden_size,
+            mappo_critic_hidden_size=args.mappo_critic_hidden_size,
         )
 
         # Save detailed results

@@ -15,7 +15,8 @@ class MAPPOAgent:
     def __init__(
         self,
         env,
-        hidden_size=256,
+        hidden_size=128,
+        critic_hidden_size=None,
         lr_actor=0.0001,
         lr_critic=0.0001,
         gamma=0.99,
@@ -35,6 +36,10 @@ class MAPPOAgent:
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.verbose = verbose
+        self.hidden_size = hidden_size
+        self.critic_hidden_size = (
+            hidden_size if critic_hidden_size is None else critic_hidden_size
+        )
 
         # Set device for GPU/MPS acceleration
         if device is None:
@@ -57,7 +62,7 @@ class MAPPOAgent:
             self.actors[agent.id] = ActorNetwork(
                 obs_space,
                 action_space,
-                hidden_size=hidden_size,
+                hidden_size=self.hidden_size,
                 device=self.device,
             ).to(self.device)
 
@@ -66,7 +71,7 @@ class MAPPOAgent:
         self.critic = CriticNetwork(
             env.observation_space(first_agent.id),
             self.n_agents,
-            hidden_size=2 * hidden_size,
+            hidden_size=self.critic_hidden_size,
             device=self.device,
         ).to(self.device)
 
