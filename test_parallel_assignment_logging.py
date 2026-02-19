@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -487,3 +488,86 @@ def test_trainer_logging_helpers_handle_edge_payloads() -> None:
     assert mixin.get_assigned_agent_id({0: "invalid"}) is None
     assert mixin.get_assigned_agent_id({0: {"assigned_agent_id": None}}) is None
     assert mixin.get_assigned_agent_id({0: {"assigned_agent_id": "4"}}) == 4
+
+
+def test_qmix_replay_ring_buffer_keeps_fixed_size_latest_transitions() -> None:
+    from QMIX.trainer import QMIXTrainer
+
+    trainer = object.__new__(QMIXTrainer)
+    trainer.buffer_size = 3
+    trainer.buffer = []
+    trainer.buffer_pos = 0
+
+    for value in range(5):
+        trainer._append_transition((value,))
+
+    assert len(trainer.buffer) == 3
+    assert {item[0] for item in trainer.buffer} == {2, 3, 4}
+    assert trainer.buffer_pos == 2
+
+
+def test_qmix_terminal_replay_transition_is_shape_safe_for_learning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _require_environment_dependencies()
+    from QMIX.agent import QMIXAgent
+    from QMIX.trainer import QMIXTrainer
+
+    t0 = pd.Timestamp("2026-02-01 14:00:00")
+    data = pd.DataFrame(
+        [
+            {
+                "case_id": 1,
+                "activity_name": "A",
+                "resource": "r0",
+                "start_timestamp": t0,
+                "end_timestamp": t0 + pd.Timedelta(seconds=1),
+            }
+        ]
+    )
+
+    env = _make_env(data=data, tmp_path=tmp_path, default_duration_seconds=1.0)
+    agent = QMIXAgent(env, device="cpu")
+    trainer = QMIXTrainer(
+        env=env,
+        agent=agent,
+        total_training_episodes=1,
+        batch_size=1,
+        buffer_size=16,
+        target_update_interval=1000,
+        eval_freq_episodes=1000,
+        save_freq_episodes=1000,
+        log_freq_episodes=1000,
+        should_eval=False,
+        experiment_dir=str(tmp_path / "qmix_replay_regression"),
+        enable_tensorboard=False,
+        disable_progress=True,
+    )
+
+    trainer.train()
+
+    terminal_transitions = [transition for transition in trainer.buffer if transition[4]]
+    assert terminal_transitions, "Expected at least one terminal transition in replay"
+
+    terminal_transition = terminal_transitions[0]
+    obs = terminal_transition[0]
+    next_obs = terminal_transition[3]
+    assert next_obs is not None, "Terminal transition next_obs should be shape-compatible"
+
+    if isinstance(obs, np.ndarray):
+        assert isinstance(next_obs, np.ndarray)
+        assert next_obs.shape == obs.shape
+        assert np.array_equal(next_obs, obs)
+    else:
+        assert set(next_obs.keys()) == set(obs.keys())
+        for agent_id in obs:
+            assert set(next_obs[agent_id].keys()) == set(obs[agent_id].keys())
+            for key in obs[agent_id]:
+                assert np.array_equal(
+                    np.asarray(next_obs[agent_id][key]),
+                    np.asarray(obs[agent_id][key]),
+                )
+
+    monkeypatch.setattr(random, "sample", lambda seq, k: [terminal_transition])
+    loss = trainer.learn()
+    assert loss is not None

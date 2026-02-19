@@ -1,4 +1,3 @@
-from datetime import datetime
 import time
 import torch
 import torch.optim as optim
@@ -25,14 +24,17 @@ class MAPPOAgent:
         batch_size=1028,
         num_epochs=10,
         device=None,
+        verbose=False,
     ):
         self.env = env
         self.n_agents = len(env.agents)
+        self.env_agent_ids = [agent.id for agent in env.agents]
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_param = clip_param
         self.batch_size = batch_size
         self.num_epochs = num_epochs
+        self.verbose = verbose
 
         # Set device for GPU/MPS acceleration
         if device is None:
@@ -43,7 +45,7 @@ class MAPPOAgent:
             else:
                 self.device = torch.device("cpu")
         else:
-            self.device = device
+            self.device = torch.device(device)
 
         print_colored(f"MAPPOAgent using device: {self.device}", "blue")
 
@@ -82,6 +84,7 @@ class MAPPOAgent:
         # Experience buffer
         self.buffer = {
             "obs": [],
+            "next_obs": [],
             "actions": [],
             "rewards": [],
             "dones": [],
@@ -94,58 +97,67 @@ class MAPPOAgent:
         # For tracking training performance
         self.episode_rewards = deque(maxlen=100)
 
-    def select_actions(self, observations, deterministic=False):
-        """Select actions for all agents based on their observations."""
+    def _log(self, text: str, color: str = "white") -> None:
+        if self.verbose:
+            print_colored(text, color)
+
+    @property
+    def _is_cpu_device(self) -> bool:
+        return self.device.type == "cpu"
+
+    def select_actions_and_value(self, observations, deterministic=False):
+        """Select actions for all agents and compute critic value in one pass."""
         actions = {}
         action_probs = {}
 
         # Ensure models are on CPU for inference during episode collection
         self._move_models_to_cpu()
 
-        # Set models to evaluation mode to disable dropout during inference
         for actor in self.actors.values():
-            actor.eval()
+            if actor.training:
+                actor.eval()
+        if self.critic.training:
+            self.critic.eval()
+
+        reward = self.buffer["rewards"][-1] if self.buffer["rewards"] else None
+        obs_list = [observations[agent_id] for agent_id in self.env_agent_ids]
 
         with torch.no_grad():
             for agent_id, obs in observations.items():
                 if agent_id in self.actors:
-                    # Get the reward for this agent from the last step
-                    reward = (
-                        self.buffer["rewards"][-1] if self.buffer["rewards"] else None
-                    )
-                    action, probs = self.actors[agent_id].act(
-                        obs, reward, deterministic
-                    )
+                    action, probs = self.actors[agent_id].act(obs, reward, deterministic)
                     actions[agent_id] = action
-                    action_probs[agent_id] = (
-                        probs  # Already on CPU since model is on CPU
-                    )
+                    action_probs[agent_id] = probs
 
+            value = self.critic(obs_list, reward).item()
+
+        return actions, action_probs, value
+
+    def select_actions(self, observations, deterministic=False):
+        """Select actions for all agents based on their observations."""
+        actions, action_probs, _ = self.select_actions_and_value(
+            observations, deterministic=deterministic
+        )
         return actions, action_probs
 
     def compute_values(self, observations):
         """Compute values for the current observations using the critic network."""
-        # Convert observations dict to list in agent order
-        obs_list = [observations[agent.id] for agent in self.env.agents]
+        obs_list = [observations[agent_id] for agent_id in self.env_agent_ids]
         # Get the reward from the last step
         reward = self.buffer["rewards"][-1] if self.buffer["rewards"] else None
 
-        # Ensure critic is on CPU for inference during episode collection
         self._move_models_to_cpu()
 
-        # Set critic to evaluation mode to disable dropout during inference
-        self.critic.eval()
+        if self.critic.training:
+            self.critic.eval()
 
         with torch.no_grad():
-            value = self.critic(
-                obs_list, reward
-            ).item()  # Already on CPU since model is on CPU
+            value = self.critic(obs_list, reward).item()
         return value
 
     def _compute_values_on_current_device(self, observations):
         """Compute values using the critic network on its current device (for use during training)."""
-        # Convert observations dict to list in agent order
-        obs_list = [observations[agent.id] for agent in self.env.agents]
+        obs_list = [observations[agent_id] for agent_id in self.env_agent_ids]
         # Get the reward from the last step
         reward = self.buffer["rewards"][-1] if self.buffer["rewards"] else None
 
@@ -153,9 +165,12 @@ class MAPPOAgent:
             value = self.critic(obs_list, reward).item()
         return value
 
-    def store_experience(self, obs, actions, action_probs, rewards, dones, values):
+    def store_experience(
+        self, obs, next_obs, actions, action_probs, rewards, dones, values
+    ):
         """Store experience in the buffer."""
         self.buffer["obs"].append(obs)
+        self.buffer["next_obs"].append(next_obs)
         self.buffer["actions"].append(actions)
         self.buffer["action_probs"].append(action_probs)
         self.buffer["rewards"].append(rewards)
@@ -174,14 +189,18 @@ class MAPPOAgent:
         rewards = np.array(self.buffer["rewards"])
         dones = np.array(self.buffer["dones"])
 
-        # Add a final value estimate for bootstrapping
-        last_obs = self.buffer["obs"][-1]
-        if use_current_device:
-            # During training, use the device where models currently are
-            last_value = self._compute_values_on_current_device(last_obs)
+        # Add a final value estimate for bootstrapping from the terminal next state.
+        # For terminal trajectories, V(s_T) is zero and there is nothing to bootstrap.
+        if len(dones) > 0 and bool(dones[-1]):
+            last_value = 0.0
         else:
-            # During normal execution, ensure models are on CPU
-            last_value = self.compute_values(last_obs)
+            last_obs = self.buffer["next_obs"][-1]
+            if use_current_device:
+                # During training, use the device where models currently are
+                last_value = self._compute_values_on_current_device(last_obs)
+            else:
+                # During normal execution, ensure models are on CPU
+                last_value = self.compute_values(last_obs)
         values = np.append(values, last_value)
 
         # Initialize advantages and returns
@@ -210,10 +229,7 @@ class MAPPOAgent:
         if len(self.buffer["obs"]) == 0:
             return
 
-        print_colored(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Updating policy on {self.device}...",
-            "yellow",
-        )
+        self._log(f"Updating policy on {self.device}...", "yellow")
         update_start_time = time.perf_counter()
 
         # Move models to device for training
@@ -221,8 +237,10 @@ class MAPPOAgent:
 
         # Set models to training mode to enable dropout and batch norm updates
         for actor in self.actors.values():
-            actor.train()
-        self.critic.train()
+            if not actor.training:
+                actor.train()
+        if not self.critic.training:
+            self.critic.train()
 
         # Compute advantages and returns (using current device since models are now on GPU/MPS)
         self.compute_advantages_and_returns(use_current_device=True)
@@ -238,53 +256,43 @@ class MAPPOAgent:
         advantages = np.array(advantages)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Prepare data for GPU processing
-        print_colored(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Preparing data for device transfer...",
-            "cyan",
-        )
-
         # Convert data to tensors and move to device
-        advantages_tensor = torch.FloatTensor(advantages).to(self.device)
-        returns_tensor = torch.FloatTensor(returns).to(self.device)
+        advantages_tensor = torch.tensor(
+            np.asarray(advantages, dtype=np.float32), device=self.device
+        )
+        returns_tensor = torch.tensor(
+            np.asarray(returns, dtype=np.float32), device=self.device
+        )
 
         # Prepare action and action probability tensors
         action_tensors = {}
         old_action_prob_tensors = {}
 
         for agent_id in self.actors:
-            agent_actions = []
-            agent_old_probs = []
-
-            for i in range(len(actions)):
-                if agent_id in actions[i]:
-                    agent_actions.append(actions[i][agent_id])
-                    agent_old_probs.append(old_action_probs[i][agent_id])
-                else:
-                    agent_actions.append(0)  # Default action
-                    agent_old_probs.append(
-                        torch.ones(self.actors[agent_id].action_head.out_features)
-                    )
-
-            action_tensors[agent_id] = torch.LongTensor(agent_actions).to(self.device)
-            # Stack old action probabilities and move to device
-            old_action_prob_tensors[agent_id] = torch.stack(agent_old_probs).to(
-                self.device
+            action_tensors[agent_id] = torch.tensor(
+                [step_actions[agent_id] for step_actions in actions],
+                dtype=torch.long,
+                device=self.device,
             )
+            old_action_prob_tensors[agent_id] = torch.stack(
+                [step_probs[agent_id] for step_probs in old_action_probs]
+            ).to(self.device)
 
-        print_colored(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Data preparation complete. Starting {self.num_epochs} epochs of training...",
+        self._log(
+            f"Data preparation complete. Starting {self.num_epochs} epochs of training...",
             "cyan",
         )
+
+        # Extract rewards once for faster batch indexing.
+        rewards_buffer = self.buffer["rewards"]
 
         # Reset history before batch processing
         self.reset_history()
 
-        # Perform multiple epochs of updates on GPU
         for epoch in range(self.num_epochs):
             epoch_start_time = time.perf_counter()
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Epoch {epoch + 1}/{self.num_epochs} - Data size: {len(observations)}",
+            self._log(
+                f"Epoch {epoch + 1}/{self.num_epochs} - Data size: {len(observations)}",
                 "blue",
             )
 
@@ -298,36 +306,25 @@ class MAPPOAgent:
                 len(observations) + self.batch_size - 1
             ) // self.batch_size  # Ceiling division
 
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Starting {total_batches} batches of size {self.batch_size}",
-                "blue",
-            )
-
             for start_idx in range(0, len(observations), self.batch_size):
                 end_idx = min(start_idx + self.batch_size, len(observations))
                 batch_indices = indices[start_idx:end_idx]
                 num_batches += 1
 
-                # Convert batch indices to CPU for data access
-                batch_indices_cpu = batch_indices.cpu().numpy()
+                batch_indices_cpu = batch_indices.tolist()
 
                 # Get batch data
                 batch_obs = [observations[i] for i in batch_indices_cpu]
+                batch_rewards = [rewards_buffer[i] for i in batch_indices_cpu]
                 batch_advantages = advantages_tensor[batch_indices]
                 batch_returns = returns_tensor[batch_indices]
 
                 # Update critic (centralized) - optimized batch processing
                 if len(batch_obs) > 0:
-                    # Prepare batch data for critic
-                    batch_obs_lists = []
-                    batch_rewards = []
-
-                    for j, obs_dict in enumerate(batch_obs):
-                        obs_list = [obs_dict[agent.id] for agent in self.env.agents]
-                        batch_idx = batch_indices_cpu[j]
-                        reward = self.buffer["rewards"][batch_idx]
-                        batch_obs_lists.append(obs_list)
-                        batch_rewards.append(reward)
+                    batch_obs_lists = [
+                        [obs_dict[agent_id] for agent_id in self.env_agent_ids]
+                        for obs_dict in batch_obs
+                    ]
 
                     # Use batch forward pass for critic - single network call for entire batch
                     value_preds = self.critic.forward_batch(
@@ -356,87 +353,43 @@ class MAPPOAgent:
                         batch_indices
                     ]
 
-                    # Prepare batch data for this actor
-                    batch_agent_obs = []
-                    batch_agent_rewards = []
-                    agent_mask = []  # Track which observations have this agent
-
-                    for j, obs_dict in enumerate(batch_obs):
-                        if agent_id in obs_dict:
-                            batch_agent_obs.append(obs_dict[agent_id])
-                            batch_idx = batch_indices_cpu[j]
-                            batch_agent_rewards.append(
-                                self.buffer["rewards"][batch_idx]
-                            )
-                            agent_mask.append(True)
-                        else:
-                            # Use dummy observation for missing agents
-                            dummy_obs = {}
-                            for key in self.env.observation_space(agent_id).keys():
-                                if hasattr(
-                                    self.env.observation_space(agent_id)[key], "sample"
-                                ):
-                                    dummy_obs[key] = self.env.observation_space(
-                                        agent_id
-                                    )[key].sample()
-                                else:
-                                    dummy_obs[key] = 0
-                            batch_agent_obs.append(dummy_obs)
-                            batch_agent_rewards.append(0.0)
-                            agent_mask.append(False)
+                    batch_agent_obs = [obs_dict[agent_id] for obs_dict in batch_obs]
 
                     # Use batch forward pass for actor - single network call for entire batch
-                    if batch_agent_obs:
-                        current_action_probs = actor.forward_batch(
-                            batch_agent_obs, batch_agent_rewards
-                        )
+                    current_action_probs = actor.forward_batch(
+                        batch_agent_obs, batch_rewards
+                    )
 
-                        # Filter out dummy entries
-                        agent_mask_tensor = torch.tensor(agent_mask, device=self.device)
-                        if agent_mask_tensor.sum() > 0:
-                            # Only process entries where agent was actually present
-                            valid_indices = agent_mask_tensor.nonzero(as_tuple=True)[0]
-                            valid_current_probs = current_action_probs[valid_indices]
-                            valid_actions = batch_agent_actions[valid_indices]
-                            valid_old_probs = batch_old_action_probs[valid_indices]
-                            valid_advantages = batch_advantages[valid_indices]
+                    # Get probabilities for taken actions
+                    current_action_prob_taken = current_action_probs.gather(
+                        1, batch_agent_actions.unsqueeze(1)
+                    ).squeeze(1)
+                    old_action_prob_taken = batch_old_action_probs.gather(
+                        1, batch_agent_actions.unsqueeze(1)
+                    ).squeeze(1)
 
-                            # Get probabilities for taken actions
-                            current_action_prob_taken = valid_current_probs.gather(
-                                1, valid_actions.unsqueeze(1)
-                            ).squeeze(1)
-                            old_action_prob_taken = valid_old_probs.gather(
-                                1, valid_actions.unsqueeze(1)
-                            ).squeeze(1)
+                    # Compute ratio
+                    ratio = current_action_prob_taken / (old_action_prob_taken + 1e-8)
 
-                            # Compute ratio
-                            ratio = current_action_prob_taken / (
-                                old_action_prob_taken + 1e-8
-                            )
+                    # Compute surrogate losses
+                    surrogate1 = ratio * batch_advantages
+                    surrogate2 = (
+                        torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+                        * batch_advantages
+                    )
 
-                            # Compute surrogate losses
-                            surrogate1 = ratio * valid_advantages
-                            surrogate2 = (
-                                torch.clamp(
-                                    ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-                                )
-                                * valid_advantages
-                            )
+                    # Actor loss
+                    actor_loss = -torch.min(surrogate1, surrogate2).mean()
+                    total_actor_losses[agent_id] += actor_loss.item()
 
-                            # Actor loss
-                            actor_loss = -torch.min(surrogate1, surrogate2).mean()
-                            total_actor_losses[agent_id] += actor_loss.item()
-
-                            # Update actor
-                            optimizer.zero_grad()
-                            actor_loss.backward()
-                            torch.nn.utils.clip_grad_norm_(
-                                actor.parameters(), max_norm=0.5
-                            )
-                            optimizer.step()
+                    # Update actor
+                    optimizer.zero_grad()
+                    actor_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=0.5)
+                    optimizer.step()
 
                 # Print progress less frequently now that batching is optimized
-                if (
+                if self.verbose and (
                     num_batches % max(1, total_batches // 3) == 0
                     or num_batches == total_batches
                 ):
@@ -445,8 +398,8 @@ class MAPPOAgent:
                     avg_critic_loss_so_far = (
                         total_critic_loss / num_batches if num_batches > 0 else 0
                     )
-                    print_colored(
-                        f"[{datetime.now().strftime('%H:%M:%S')}] Epoch {epoch + 1} - "
+                    self._log(
+                        f"Epoch {epoch + 1} - "
                         f"Batch {num_batches}/{total_batches} ({progress_pct:.1f}%) - "
                         f"Time: {elapsed_time:.1f}s - Critic Loss: {avg_critic_loss_so_far:.6f}",
                         "purple",
@@ -454,17 +407,14 @@ class MAPPOAgent:
 
             epoch_time = time.perf_counter() - epoch_start_time
             avg_critic_loss = total_critic_loss / num_batches if num_batches > 0 else 0
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Epoch {epoch + 1} complete - "
+            self._log(
+                f"Epoch {epoch + 1} complete - "
                 f"Time: {epoch_time:.2f}s, Critic Loss: {avg_critic_loss:.6f}",
                 "green",
             )
 
         total_update_time = time.perf_counter() - update_start_time
-        print_colored(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Policy update complete - Total time: {total_update_time:.2f}s",
-            "yellow",
-        )
+        self._log(f"Policy update complete - Total time: {total_update_time:.2f}s", "yellow")
 
         # Move models back to CPU for next simulation episodes
         self._move_models_to_cpu()
@@ -472,6 +422,7 @@ class MAPPOAgent:
         # Clear the buffer after updating
         self.buffer = {
             "obs": [],
+            "next_obs": [],
             "actions": [],
             "rewards": [],
             "dones": [],
@@ -515,38 +466,34 @@ class MAPPOAgent:
 
     def _move_models_to_cpu(self):
         """Move all models to CPU for inference during simulation."""
+        if self._is_cpu_device:
+            self._models_on_cpu = True
+            return
+
         if not hasattr(self, "_models_on_cpu") or not self._models_on_cpu:
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Moving models to CPU for inference...",
-                "cyan",
-            )
+            self._log("Moving models to CPU for inference...", "cyan")
             start_time = time.perf_counter()
             for actor in self.actors.values():
                 actor.to(torch.device("cpu"))
             self.critic.to(torch.device("cpu"))
             transfer_time = time.perf_counter() - start_time
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Models moved to CPU in {transfer_time:.3f}s",
-                "cyan",
-            )
+            self._log(f"Models moved to CPU in {transfer_time:.3f}s", "cyan")
             self._models_on_cpu = True
 
     def _move_models_to_device(self):
         """Move all models to GPU/MPS device for training."""
+        if self._is_cpu_device:
+            self._models_on_cpu = True
+            return
+
         if not hasattr(self, "_models_on_cpu") or self._models_on_cpu:
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Moving models to {self.device} for training...",
-                "cyan",
-            )
+            self._log(f"Moving models to {self.device} for training...", "cyan")
             start_time = time.perf_counter()
             for actor in self.actors.values():
                 actor.to(self.device)
             self.critic.to(self.device)
             transfer_time = time.perf_counter() - start_time
-            print_colored(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Models moved to {self.device} in {transfer_time:.3f}s",
-                "cyan",
-            )
+            self._log(f"Models moved to {self.device} in {transfer_time:.3f}s", "cyan")
             self._models_on_cpu = False
 
     def _ensure_optimizers_on_device(self):

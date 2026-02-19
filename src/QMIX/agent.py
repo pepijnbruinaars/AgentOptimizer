@@ -101,6 +101,9 @@ class QMIXAgent:
         first_agent = env.agents[0]
         obs_space = env.observation_space(first_agent.id)
         self.obs_dim = self._calculate_obs_dim(obs_space)
+        self._obs_keys: list[str] | None = (
+            sorted(obs_space.keys()) if hasattr(obs_space, "keys") else None
+        )
 
         # Calculate state dimension - add environment-specific global state features
         # Global state includes: all agent observations + global environment info
@@ -146,6 +149,12 @@ class QMIXAgent:
         print_colored(f"  Gamma: {self.gamma}", "cyan")
         print_colored(f"  Initial epsilon: {self.epsilon}", "cyan")
 
+        # Per-step observation cache to avoid redundant flattening across
+        # select_actions/get_q_values/get_global_state calls.
+        self._obs_cache_observations = None
+        self._obs_cache_matrix = None
+        self._obs_cache_global_state = None
+
     def _calculate_obs_dim(self, obs_space):
         """Calculate the total observation dimension from observation space"""
         total_dim = 0
@@ -170,22 +179,64 @@ class QMIXAgent:
 
         return total_dim
 
+    def _get_cached_observation_views(self, observations):
+        """Return flattened per-agent observations and global state, with step-local cache."""
+        if observations is self._obs_cache_observations:
+            return self._obs_cache_matrix, self._obs_cache_global_state
+
+        obs_arrays = [
+            self._flatten_observation(observations[agent.id]) for agent in self.env.agents
+        ]
+        obs_matrix = np.stack(obs_arrays).astype(np.float32, copy=False)
+
+        # Combine all agent observations plus global environment features.
+        global_obs = obs_matrix.reshape(-1)
+        env_features = np.array(
+            [
+                len(self.env.future_cases),
+                len(self.env.pending_cases),
+                len(self.env.completed_cases),
+                self.env.steps,
+                1.0 if self.env.upcoming_case is not None else 0.0,
+            ],
+            dtype=np.float32,
+        )
+        global_state = np.concatenate([global_obs, env_features]).astype(
+            np.float32, copy=False
+        )
+
+        self._obs_cache_observations = observations
+        self._obs_cache_matrix = obs_matrix
+        self._obs_cache_global_state = global_state
+        return obs_matrix, global_state
+
+    def get_observation_matrix(self, observations) -> np.ndarray:
+        """Return per-agent flattened observation matrix for one environment state."""
+        obs_matrix, _ = self._get_cached_observation_views(observations)
+        return obs_matrix
+
     def _flatten_observation(self, obs_dict):
         """Convert dictionary observation to flat numpy array"""
-        obs_list = []
-        for key in sorted(obs_dict.keys()):  # Sort keys for consistent ordering
+        obs_parts = []
+        keys = self._obs_keys if self._obs_keys is not None else sorted(obs_dict.keys())
+        for key in keys:
             value = obs_dict[key]
-            if isinstance(value, (int, float)):
-                obs_list.append(float(value))
-            elif isinstance(value, (list, np.ndarray)):
-                obs_list.extend([float(x) for x in np.array(value).flatten()])
+            if isinstance(value, np.ndarray):
+                obs_parts.append(value.astype(np.float32, copy=False).reshape(-1))
+            elif isinstance(value, list):
+                obs_parts.append(np.asarray(value, dtype=np.float32).reshape(-1))
             else:
                 # Try to convert to float, fallback to 0.0
                 try:
-                    obs_list.append(float(value))
+                    obs_parts.append(np.asarray([value], dtype=np.float32))
                 except (TypeError, ValueError):
-                    obs_list.append(0.0)
-        return np.array(obs_list)
+                    obs_parts.append(np.asarray([0.0], dtype=np.float32))
+
+        if not obs_parts:
+            return np.zeros(0, dtype=np.float32)
+        if len(obs_parts) == 1:
+            return obs_parts[0]
+        return np.concatenate(obs_parts).astype(np.float32, copy=False)
 
     def prepare_batch_observations(self, obs_batch):
         """Prepare batch of observations for efficient GPU processing.
@@ -199,38 +250,28 @@ class QMIXAgent:
         Returns:
             torch.Tensor of shape [batch_size, n_agents, obs_dim] on device
         """
+        if obs_batch and isinstance(obs_batch[0], np.ndarray):
+            batch_obs = np.asarray(obs_batch, dtype=np.float32)
+            return torch.from_numpy(batch_obs).to(self.device)
+
         batch_size = len(obs_batch)
-        batch_obs_arrays = []
-
-        # Flatten all observations at once
-        for obs in obs_batch:
-            obs_arrays = []
-            for agent in self.env.agents:
-                flat_obs = self._flatten_observation(obs[agent.id])
-                obs_arrays.append(flat_obs)
-            # Stack all agents' observations for this sample
-            batch_obs_arrays.append(np.stack(obs_arrays))
-
-        # Create single tensor for entire batch and move to device once
-        batch_obs = np.stack(batch_obs_arrays)
-        batch_tensor = torch.tensor(
-            batch_obs, dtype=torch.float32, device=self.device
+        batch_obs = np.empty(
+            (batch_size, self.n_agents, self.obs_dim),
+            dtype=np.float32,
         )
-        return batch_tensor  # Shape: [batch_size, n_agents, obs_dim]
+
+        for batch_idx, obs in enumerate(obs_batch):
+            for agent_idx, agent in enumerate(self.env.agents):
+                batch_obs[batch_idx, agent_idx, :] = self._flatten_observation(
+                    obs[agent.id]
+                )
+
+        return torch.from_numpy(batch_obs).to(self.device)
 
     def select_actions(self, observations, deterministic=False):
         """Select actions for all agents with optional logging."""
-        # Convert dictionary observations to flat arrays
-        obs_arrays = []
-        for agent in self.env.agents:
-            flat_obs = self._flatten_observation(observations[agent.id])
-            obs_arrays.append(flat_obs)
-
-        obs = np.stack(obs_arrays)
-        obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
-
-        # Set network to evaluation mode to disable dropout during inference
-        self.agent_net.eval()
+        obs_matrix, _ = self._get_cached_observation_views(observations)
+        obs = torch.from_numpy(obs_matrix).to(self.device)
 
         with torch.no_grad():
             q_values = self.agent_net(obs)
@@ -258,7 +299,7 @@ class QMIXAgent:
             elif not hasattr(self, "_last_epsilon_log"):
                 self._last_epsilon_log = self.epsilon
 
-        return {agent.id: actions[i] for i, agent in enumerate(self.env.agents)}, None
+        return {agent.id: actions[i] for i, agent in enumerate(self.env.agents)}, q_values
 
     def get_training_summary(self) -> str:
         """Get a summary of the current training state."""
@@ -299,43 +340,14 @@ class QMIXAgent:
 
     def get_q_values(self, observations):
         """Get Q-values for given observations"""
-        obs_arrays = []
-        for agent in self.env.agents:
-            flat_obs = self._flatten_observation(observations[agent.id])
-            obs_arrays.append(flat_obs)
-
-        obs = np.stack(obs_arrays)
-        obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
-
-        # Set network to evaluation mode to disable dropout during inference
-        self.agent_net.eval()
-
+        obs_matrix, _ = self._get_cached_observation_views(observations)
+        obs = torch.from_numpy(obs_matrix).to(self.device)
         return self.agent_net(obs)
 
     def get_global_state(self, observations):
         """Create global state from all agent observations plus environment info"""
-        obs_arrays = []
-        for agent in self.env.agents:
-            flat_obs = self._flatten_observation(observations[agent.id])
-            obs_arrays.append(flat_obs)
-
-        # Combine all agent observations
-        global_obs = np.concatenate(obs_arrays)
-
-        # Add global environment features
-        env_features = np.array(
-            [
-                len(self.env.future_cases),  # Number of future cases
-                len(self.env.pending_cases),  # Number of pending cases
-                len(self.env.completed_cases),  # Number of completed cases
-                self.env.steps,  # Current step
-                (
-                    1.0 if self.env.upcoming_case is not None else 0.0
-                ),  # Whether there's an upcoming case
-            ]
-        )
-
-        return np.concatenate([global_obs, env_features])
+        _, global_state = self._get_cached_observation_views(observations)
+        return global_state
 
     def save_models(self, path):
         """Save model weights to the specified path with comprehensive logging."""

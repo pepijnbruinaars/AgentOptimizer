@@ -191,13 +191,10 @@ class MAPPOTrainer(TrainerLoggingMixin):
 
             done = False
             while not done:
-                # Select actions using the current policy
-                actions, action_probs = self.agent.select_actions(obs)
+                # Select actions and state value using the current policy
+                actions, action_probs, value = self.agent.select_actions_and_value(obs)
                 episode_actions.append(map_actions_to_array(actions))
                 episode_action_probs.append(map_action_probs_to_array(action_probs))
-
-                # Get state value
-                value = self.agent.compute_values(obs)
 
                 # Take actions in the environment
                 next_obs, rewards, dones, truncated, infos = self.env.step(actions)
@@ -215,7 +212,7 @@ class MAPPOTrainer(TrainerLoggingMixin):
                 # Store experience
                 done = any(list(dones.values()) + list(truncated.values()))
                 self.agent.store_experience(
-                    obs, actions, action_probs, step_reward, done, value
+                    obs, next_obs, actions, action_probs, step_reward, done, value
                 )
 
                 # Update episode tracking

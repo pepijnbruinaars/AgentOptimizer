@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from collections import deque
 import random
 import os
 import time
@@ -35,7 +34,10 @@ class QMIXTrainer(TrainerLoggingMixin):
         self.agent = agent
         self.total_training_episodes = total_training_episodes
         self.batch_size = batch_size
-        self.buffer = deque(maxlen=buffer_size)
+        # Ring-buffer storage avoids expensive random indexing on deque.
+        self.buffer_size = buffer_size
+        self.buffer = []
+        self.buffer_pos = 0
         self.target_update_interval = target_update_interval
 
         # Logging and evaluation parameters
@@ -109,10 +111,11 @@ class QMIXTrainer(TrainerLoggingMixin):
                     )
 
                 # Select actions using the current policy
-                actions, _ = self.agent.select_actions(obs)
+                actions, q_values = self.agent.select_actions(obs)
 
                 # Get Q-values for logging
-                q_values = self.agent.get_q_values(obs)
+                if q_values is None:
+                    q_values = self.agent.get_q_values(obs)
                 episode_actions.append(self._map_actions_to_array(actions))
                 episode_q_values.append(q_values.detach().cpu().numpy())
 
@@ -128,17 +131,25 @@ class QMIXTrainer(TrainerLoggingMixin):
                 episode_assigned_agents.append(assigned_agent_id)
 
                 # Store experience for replay buffer
+                obs_matrix = self.agent.get_observation_matrix(obs)
                 global_state = self.agent.get_global_state(obs)
+                # The environment returns {} observations on terminal steps.
+                # Keep a shape-compatible placeholder for replay so batched next-state
+                # processing stays valid even when sampling terminal transitions.
+                next_obs_for_buffer = next_obs if not done else obs
+                next_obs_matrix = self.agent.get_observation_matrix(next_obs_for_buffer)
                 next_global_state = (
-                    self.agent.get_global_state(next_obs) if not done else None
+                    self.agent.get_global_state(next_obs_for_buffer)
+                    if not done
+                    else None
                 )
 
-                self.buffer.append(
+                self._append_transition(
                     (
-                        obs,
+                        obs_matrix,
                         actions,
                         reward,
-                        next_obs,
+                        next_obs_matrix,
                         done,
                         global_state,
                         next_global_state,
@@ -378,18 +389,11 @@ class QMIXTrainer(TrainerLoggingMixin):
 
     def learn(self):
         """Learn from a batch of experiences and return the loss."""
-        # Set networks to training mode to enable dropout and batch norm updates
-        self.agent.agent_net.train()
-        self.agent.target_agent_net.train()
-        self.agent.mixing_net.train()
-        self.agent.target_mixing_net.train()
-
         if len(self.buffer) < self.batch_size:
             return None
 
         # Sample a batch from the replay buffer
-        batch_indices = random.sample(range(len(self.buffer)), self.batch_size)
-        batch = [self.buffer[idx] for idx in batch_indices]
+        batch = random.sample(self.buffer, self.batch_size)
 
         (
             obs_batch,
@@ -402,8 +406,11 @@ class QMIXTrainer(TrainerLoggingMixin):
         ) = zip(*batch)
 
         # Convert to tensors
-        reward_batch = torch.FloatTensor(reward_batch).to(self.agent.device)
-        done_batch = torch.BoolTensor(done_batch).to(self.agent.device)
+        reward_batch_tensor = torch.tensor(
+            np.asarray(reward_batch, dtype=np.float32), device=self.agent.device
+        )
+        done_batch_np = np.asarray(done_batch, dtype=np.bool_)
+        done_batch_tensor = torch.tensor(done_batch_np, device=self.agent.device)
 
         # Get current Q-values for all agents (batched)
         # Prepare all observations at once for efficient GPU processing
@@ -444,9 +451,20 @@ class QMIXTrainer(TrainerLoggingMixin):
 
         # Get next Q-values for target network (batched)
         with torch.no_grad():
+            # Defensively handle terminal transitions originating from older replay
+            # entries where next_obs may be {}.
+            safe_next_obs_batch = []
+            for curr_obs, next_obs, is_done in zip(obs_batch, next_obs_batch, done_batch_np):
+                if is_done:
+                    safe_next_obs_batch.append(curr_obs)
+                elif isinstance(next_obs, dict) and not next_obs:
+                    safe_next_obs_batch.append(curr_obs)
+                else:
+                    safe_next_obs_batch.append(next_obs)
+
             # Prepare all next observations at once for efficient GPU processing
             batch_next_obs_tensor = self.agent.prepare_batch_observations(
-                next_obs_batch
+                safe_next_obs_batch
             )  # [batch_size, n_agents, obs_dim]
 
             # Reshape to [batch_size * n_agents, obs_dim] for single forward pass
@@ -463,21 +481,18 @@ class QMIXTrainer(TrainerLoggingMixin):
             )  # [batch_size, n_agents, n_actions]
 
             # Zero out Q-values for done episodes
-            done_mask = done_batch.unsqueeze(-1).unsqueeze(-1)  # [batch_size, 1, 1]
+            done_mask = done_batch_tensor.unsqueeze(-1).unsqueeze(-1)  # [batch_size, 1, 1]
             target_q_values = target_q_values * (~done_mask)
         target_max_q_values = target_q_values.max(dim=2)[0]  # [batch_size, n_agents]
 
         # Convert states to tensors
-        state_tensors = torch.FloatTensor(np.array(state_batch)).to(self.agent.device)
-        next_state_tensors = []
-        for i, next_state in enumerate(next_state_batch):
-            if done_batch[i]:
-                next_state_tensors.append(torch.zeros_like(state_tensors[0]))
-            else:
-                next_state_tensors.append(
-                    torch.FloatTensor(next_state).to(self.agent.device)
-                )
-        next_state_tensors = torch.stack(next_state_tensors)
+        state_array = np.asarray(state_batch, dtype=np.float32)
+        state_tensors = torch.tensor(state_array, device=self.agent.device)
+        next_state_array = np.zeros_like(state_array)
+        for i, (next_state, is_done) in enumerate(zip(next_state_batch, done_batch_np)):
+            if not is_done and next_state is not None:
+                next_state_array[i] = np.asarray(next_state, dtype=np.float32)
+        next_state_tensors = torch.tensor(next_state_array, device=self.agent.device)
 
         # Calculate mixed Q-values
         current_mixed_q = self.agent.mixing_net(chosen_q_values, state_tensors)
@@ -486,8 +501,8 @@ class QMIXTrainer(TrainerLoggingMixin):
             target_mixed_q = self.agent.target_mixing_net(
                 target_max_q_values, next_state_tensors
             )
-            target_q = reward_batch.unsqueeze(1) + self.agent.gamma * target_mixed_q * (
-                ~done_batch
+            target_q = reward_batch_tensor.unsqueeze(1) + self.agent.gamma * target_mixed_q * (
+                ~done_batch_tensor
             ).unsqueeze(1)
 
         # Calculate loss
@@ -505,6 +520,15 @@ class QMIXTrainer(TrainerLoggingMixin):
         self.agent.optimizer.step()
 
         return loss.item()
+
+    def _append_transition(self, transition) -> None:
+        """Store a transition in a fixed-size ring buffer."""
+        if len(self.buffer) < self.buffer_size:
+            self.buffer.append(transition)
+            return
+
+        self.buffer[self.buffer_pos] = transition
+        self.buffer_pos = (self.buffer_pos + 1) % self.buffer_size
 
     def _map_actions_to_array(self, actions: dict[int, int]) -> np.ndarray:
         """Maps the actions output dict to an array with the nth key mapped to the nth index."""

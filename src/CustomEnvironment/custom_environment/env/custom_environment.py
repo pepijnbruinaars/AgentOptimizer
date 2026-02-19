@@ -1,4 +1,5 @@
 import os
+from collections import deque
 from gymnasium.spaces import Discrete, MultiBinary, Box, Dict as GymDict
 from pettingzoo import ParallelEnv  # type: ignore
 import numpy as np
@@ -62,7 +63,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
         # CSV logging buffer - batch writes for performance
         self.csv_buffer: list[list] = []
-        self.csv_buffer_size: int = 100  # Flush every 100 tasks
+        self.csv_buffer_size: int = 1000  # Flush every 1000 tasks
         self.csv_header_written: bool = False
 
         # Total number of steps and epochs
@@ -80,7 +81,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
             i: task for i, task in enumerate(sorted(set(self.data["activity_name"])))
         }
         self.current_time: pd.Timestamp = simulation_parameters["start_timestamp"]
-        self.future_cases: list[Case] = self._initialize_future_cases()
+        self.future_cases = self._initialize_future_cases()
         self.pending_cases: list[Case] = []
         self.completed_cases: list[Case] = []
         self.upcoming_case: Case | None = None
@@ -169,35 +170,59 @@ class AgentOptimizerEnvironment(ParallelEnv):
                 f"Resource '{resource_name}' not found in resource dictionary."
             )
 
-    def _initialize_future_cases(self) -> list[Case]:
-        """Function that initializes the future cases with the first event of each case in the data."""
-        future_cases: list[Case] = []
-        # Group the data by case_id, and iterate over each case
+    def _build_case_templates(self) -> list[tuple[int, pd.Timestamp, list[int]]]:
+        """Precompute static case templates from the source dataframe once."""
+        templates: list[tuple[int, pd.Timestamp, list[int]]] = []
         grouped_and_sorted = self.data.sort_values(
             ["start_timestamp", "end_timestamp"]
         ).groupby("case_id", sort=False)
-        for case_id, case_data in grouped_and_sorted:
-            ordered_case_data = case_data.sort_values(["start_timestamp", "end_timestamp"])
-            # Start timestamp of a case is the earliest timestamp of the case
-            start_timestamp = ordered_case_data["start_timestamp"].min()
-            future_tasks = ordered_case_data["activity_name"].tolist()
-            case = Case(
-                int(str(case_id)),
-                start_timestamp,
-                [
-                    Task(self.task_dict[task], int(str(case_id)))
-                    for task in future_tasks
-                ],
-            )
-            case.environment = self  # Set environment reference
-            for task in case.all_tasks:
-                task.environment = self  # Set environment reference for all tasks
 
+        for case_id, case_data in grouped_and_sorted:
+            ordered_case_data = case_data.sort_values(
+                ["start_timestamp", "end_timestamp"]
+            )
+            start_timestamp = ordered_case_data["start_timestamp"].min()
+            task_ids = [
+                self.task_dict[task]
+                for task in ordered_case_data["activity_name"].tolist()
+            ]
+            templates.append((int(str(case_id)), start_timestamp, task_ids))
+
+        templates.sort(key=lambda x: x[1])
+        return templates
+
+    def _initialize_future_cases(self):
+        """Instantiate fresh case objects from cached templates."""
+        if not hasattr(self, "_case_templates"):
+            self._case_templates = self._build_case_templates()
+
+        future_cases = deque()
+        for case_id, start_timestamp, task_ids in self._case_templates:
+            case = Case(
+                case_id,
+                start_timestamp,
+                [Task(task_id, case_id) for task_id in task_ids],
+            )
+            case.environment = self
+            for task in case.all_tasks:
+                task.environment = self
             future_cases.append(case)
 
-        future_cases.sort(key=lambda x: x.open_timestamp)
-
         return future_cases
+
+    def _peek_next_future_case(self) -> Case | None:
+        """Return next future case without removing it."""
+        if not self.future_cases:
+            return None
+        return self.future_cases[0]
+
+    def _pop_next_future_case(self) -> Case | None:
+        """Pop next future case, supporting deque and list for test overrides."""
+        if not self.future_cases:
+            return None
+        if hasattr(self.future_cases, "popleft"):
+            return self.future_cases.popleft()
+        return self.future_cases.pop(0)
 
     def _filter_completed_cases(self) -> None:
         """Filter out completed cases from pending_cases and move them to completed_cases."""
@@ -225,7 +250,10 @@ class AgentOptimizerEnvironment(ParallelEnv):
         """Check if there is assignment work to do without advancing simulation time."""
         if self._find_unhandled_pending_case(at_time) is not None:
             return True
-        return bool(self.future_cases and self.future_cases[0].open_timestamp <= at_time)
+        next_future_case = self._peek_next_future_case()
+        return bool(
+            next_future_case is not None and next_future_case.open_timestamp <= at_time
+        )
 
     def _flush_csv_buffer(self, force: bool = False) -> None:
         """Flush accumulated CSV data to file if buffer is full or forced."""
@@ -406,14 +434,17 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.upcoming_case = self._find_unhandled_pending_case(self.current_time)
 
         # Otherwise, bring in the next arrived future case.
+        next_future_case = self._peek_next_future_case()
         if (
             self.upcoming_case is None
-            and self.future_cases
-            and self.future_cases[0].open_timestamp <= self.current_time
+            and next_future_case is not None
+            and next_future_case.open_timestamp <= self.current_time
         ):
             # Assign the next future case to the upcoming case
-            self.upcoming_case = self.future_cases.pop(0)
-            self.pending_cases.append(self.upcoming_case)
+            next_case = self._pop_next_future_case()
+            if next_case is not None:
+                self.upcoming_case = next_case
+                self.pending_cases.append(next_case)
 
         ### ------------------------------- ###
         ###      PREPARE OBSERVATIONS       ###
@@ -434,10 +465,12 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
         # Build task queue - pre-allocate array
         task_queue = np.full(MAX_TASKS_PER_AGENT, -1, dtype=np.int32)
-        queue_size = min(agent.case_queue.size(), MAX_TASKS_PER_AGENT)
-        for i in range(queue_size):
-            case = agent.case_queue.peek(i)
-            if case and case.current_task is not None:
+        queue_size = 0
+        for i, case in enumerate(agent.case_queue):
+            if i >= MAX_TASKS_PER_AGENT:
+                break
+            queue_size += 1
+            if case.current_task is not None:
                 task_queue[i] = case.current_task.id
 
         # Check if agent can perform the task
@@ -484,12 +517,14 @@ class AgentOptimizerEnvironment(ParallelEnv):
         )
         if len(self.pending_cases) > 5:
             print("  ...")
-        if self.future_cases:
-            print(f"  Next arrival: {self.future_cases[0].open_timestamp}")
+        next_future_case = self._peek_next_future_case()
+        if next_future_case is not None:
+            print(f"  Next arrival: {next_future_case.open_timestamp}")
+        future_cases_list = list(self.future_cases)
         display_indented_list(
-            self.future_cases[:5], f"Future Cases ({len(self.future_cases)})"
+            future_cases_list[:5], f"Future Cases ({len(future_cases_list)})"
         )
-        if len(self.future_cases) > 5:
+        if len(future_cases_list) > 5:
             print("  ...")
         print(f"Completed Cases: {len(self.completed_cases)}")
         print("--- End State ---")
@@ -619,9 +654,10 @@ class AgentOptimizerEnvironment(ParallelEnv):
                 next_event_times.append(agent.busy_until)
 
         # Add next case arrival time from future cases
-        if len(self.future_cases) > 0:
+        next_future_case = self._peek_next_future_case()
+        if next_future_case is not None:
             # Only add the arrival time if it's in the future
-            arrival_time = self.future_cases[0].open_timestamp
+            arrival_time = next_future_case.open_timestamp
             if arrival_time > self.current_time:
                 next_event_times.append(arrival_time)
 
