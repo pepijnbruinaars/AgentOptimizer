@@ -21,10 +21,10 @@ class QMIXTrainer(TrainerLoggingMixin):
         batch_size=1028,
         buffer_size=10000,
         target_update_interval=100,
-        eval_freq_episodes=10,
+        eval_freq_episodes=5,
         save_freq_episodes=25,
         log_freq_episodes=10,
-        eval_episodes=3,
+        eval_episodes=1,
         should_eval=True,
         experiment_dir="./experiments/qmix_default",
         enable_tensorboard=True,
@@ -117,12 +117,14 @@ class QMIXTrainer(TrainerLoggingMixin):
                 episode_q_values.append(q_values.detach().cpu().numpy())
 
                 # Take actions in the environment
-                next_obs, rewards, terminations, truncations, _ = self.env.step(actions)
-                reward = float(sum(rewards.values()))
+                next_obs, rewards, terminations, truncations, infos = self.env.step(
+                    actions
+                )
+                reward = self.get_cooperative_step_reward(rewards)
                 done = any(list(terminations.values()) + list(truncations.values()))
 
                 # Track assigned agent if a task was assigned
-                assigned_agent_id = self._get_assigned_agent(actions)
+                assigned_agent_id = self._get_assigned_agent(infos)
                 episode_assigned_agents.append(assigned_agent_id)
 
                 # Store experience for replay buffer
@@ -511,19 +513,9 @@ class QMIXTrainer(TrainerLoggingMixin):
             array[i] = actions[agent.id]
         return array
 
-    def _get_assigned_agent(self, actions: dict[int, int]) -> int | None:
-        """Get the ID of the agent that was assigned a task, if any."""
-        if (
-            self.env.upcoming_case is not None
-            and self.env.upcoming_case.current_task is not None
-        ):
-            # Get the selected agent ID from the environment
-            for agent_id, action in actions.items():
-                if action == 1 and self.env.agents[agent_id].can_perform_task(
-                    self.env.upcoming_case.current_task.id
-                ):
-                    return agent_id
-        return None
+    def _get_assigned_agent(self, infos: dict) -> int | None:
+        """Get the ID of the agent assigned in the current step."""
+        return self.get_assigned_agent_id(infos)
 
     def evaluate(self, deterministic=True):
         """Evaluate the current policy."""
@@ -549,7 +541,7 @@ class QMIXTrainer(TrainerLoggingMixin):
                 actions, _ = self.agent.select_actions(obs, deterministic=deterministic)
                 next_obs, rewards, terminations, truncations, _ = self.env.step(actions)
 
-                step_reward = float(sum(rewards.values()))
+                step_reward = self.get_cooperative_step_reward(rewards)
                 episode_reward += step_reward
                 episode_cumulative_reward += step_reward
                 eval_cumulative_rewards.append(episode_cumulative_reward)

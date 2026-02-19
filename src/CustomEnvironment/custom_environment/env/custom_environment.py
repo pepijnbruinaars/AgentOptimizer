@@ -214,23 +214,10 @@ class AgentOptimizerEnvironment(ParallelEnv):
         else:
             debug_print_colored("No remaining cases")
 
-    def _get_handled_cases(self) -> set[Case]:
-        """Collect all cases currently handled by agents or queued for them."""
-        handled_cases: set[Case] = set()
-        for agent in self.agents:
-            if agent.current_case:
-                handled_cases.add(agent.current_case)
-            for i in range(agent.case_queue.size()):
-                case = agent.case_queue.peek(i)
-                if case:
-                    handled_cases.add(case)
-        return handled_cases
-
     def _find_unhandled_pending_case(self, at_time: pd.Timestamp) -> Case | None:
-        """Find the next pending case that is ready and not already handled."""
-        handled_cases = self._get_handled_cases()
+        """Find the next pending case ready for assignment and not already assigned."""
         for case in self.pending_cases:
-            if case not in handled_cases and case.is_eligible_for_next_task(at_time):
+            if case.assigned_agent is None and case.is_eligible_for_next_task(at_time):
                 return case
         return None
 
@@ -277,6 +264,11 @@ class AgentOptimizerEnvironment(ParallelEnv):
     def step(self, actions: dict[int, int]) -> tuple[dict, dict, dict, dict, dict]:
         """Execute one step of the environment's dynamics."""
         self.steps += 1
+        self.completed_task = None
+
+        assigned_agent_id: int | None = None
+        assigned_case_id: int | None = None
+        assigned_task_id: int | None = None
 
         ### -------------------------------- ###
         ### HANDLE ACTION FROM CURRENT STEP  ###
@@ -286,6 +278,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
             and self.upcoming_case.current_task is not None
         ):
             task_id = self.upcoming_case.current_task.id
+            case_id = self.upcoming_case.id
             # Check which agents volunteered for the task
             available_agents = [
                 agent_id
@@ -311,12 +304,15 @@ class AgentOptimizerEnvironment(ParallelEnv):
                 )
 
             # Select a random agent from volunteers
-            selected_agent_id = np.random.choice(available_agents)
+            selected_agent_id = int(np.random.choice(available_agents))
             selected_agent = self.agents[selected_agent_id]
 
             debug_print_colored(f"Upcoming case: {self.upcoming_case}")
             # Assign the case to the selected agent
             self.upcoming_case.assign_to_agent(selected_agent, self.current_time)
+            assigned_agent_id = selected_agent_id
+            assigned_case_id = case_id
+            assigned_task_id = task_id
             # Reset upcoming_case to None after assignment to prevent duplicates
             self.upcoming_case = None
 
@@ -387,10 +383,16 @@ class AgentOptimizerEnvironment(ParallelEnv):
         # Compute reward
         reward = get_reward(self)
         rewards = {agent.id: reward for agent in self.agents}
+        step_info = {
+            "assigned_agent_id": assigned_agent_id,
+            "assigned_case_id": assigned_case_id,
+            "assigned_task_id": assigned_task_id,
+        }
+        infos = {agent.id: dict(step_info) for agent in self.agents}
 
         # Return early if simulation should stop
         if any(terminations.values()) or any(truncations.values()):
-            return {}, rewards, terminations, truncations, {}
+            return {}, rewards, terminations, truncations, infos
 
         ### --------------------------------------- ###
         ### DETERMINE CASE FOR NEXT SIMULATION STEP ###
@@ -418,7 +420,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
             agent.id: self._get_observations(agent) for agent in self.agents
         }
 
-        return observations, rewards, terminations, truncations, {}
+        return observations, rewards, terminations, truncations, infos
 
     def _get_observations(self, agent: ResourceAgent):
         # Get the upcoming task ID
@@ -429,12 +431,12 @@ class AgentOptimizerEnvironment(ParallelEnv):
         )
 
         # Build task queue - pre-allocate array
-        task_queue = np.zeros(MAX_TASKS_PER_AGENT, dtype=np.int32)
+        task_queue = np.full(MAX_TASKS_PER_AGENT, -1, dtype=np.int32)
         queue_size = min(agent.case_queue.size(), MAX_TASKS_PER_AGENT)
         for i in range(queue_size):
             case = agent.case_queue.peek(i)
-            if case:
-                task_queue[i] = case.id
+            if case and case.current_task is not None:
+                task_queue[i] = case.current_task.id
 
         # Check if agent can perform the task
         agent_can_perform_task = (
@@ -454,6 +456,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
             "task_id": task_id,
             "task_duration_left": agent.task_duration(self.current_time),
             "agents_task_queue": task_queue,
+            "agent_queue_length": np.int32(queue_size),
             "upcoming_task_mean": (
                 task_stats["mean"] if task_stats else -1
             ),
@@ -493,28 +496,44 @@ class AgentOptimizerEnvironment(ParallelEnv):
         """Returns the observation space for a single agent."""
         return GymDict(
             {
-                "task_id": Discrete(self.num_activities),
-                "task_duration_left": Box(low=0, high=np.inf, shape=(), dtype=np.int64),
+                "task_id": Box(
+                    low=-1,
+                    high=self.num_activities - 1,
+                    shape=(),
+                    dtype=np.int32,
+                ),
+                "task_duration_left": Box(
+                    low=-1,
+                    high=np.inf,
+                    shape=(),
+                    dtype=np.float64,
+                ),
                 "agents_task_queue": Box(
-                    0,
+                    -1,
                     self.num_activities - 1,
                     shape=(MAX_TASKS_PER_AGENT,),
                     dtype=np.int32,
                 ),
-                "upcoming_task_mean": Box(
+                "agent_queue_length": Box(
                     0,
+                    MAX_TASKS_PER_AGENT,
+                    shape=(),
+                    dtype=np.int32,
+                ),
+                "upcoming_task_mean": Box(
+                    -1,
                     np.inf,
                     shape=(),
                     dtype=np.float64,
                 ),
                 "upcoming_task_median": Box(
-                    0,
+                    -1,
                     np.inf,
                     shape=(),
                     dtype=np.float64,
                 ),
                 "upcoming_task_std": Box(
-                    0,
+                    -1,
                     np.inf,
                     shape=(),
                     dtype=np.float64,
@@ -548,6 +567,7 @@ class AgentOptimizerEnvironment(ParallelEnv):
         self.pending_cases = []
         self.completed_cases = []
         self.upcoming_case = None
+        self.completed_task = None
         current_timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = os.path.join(self.log_dir, f"log_{current_timestamp}.csv")
         self.csv_buffer.clear()
@@ -595,19 +615,6 @@ class AgentOptimizerEnvironment(ParallelEnv):
         for agent in self.agents:
             if agent.busy_until is not None:
                 next_event_times.append(agent.busy_until)
-
-        # Add task completion timestamps from pending cases
-        if len(self.pending_cases) > 0:
-            task_completion_times = [
-                case.current_task.completion_timestamp
-                for case in self.pending_cases
-                if case.current_task and case.current_task.completion_timestamp
-            ]
-            # Only add times that are in the future
-            task_completion_times = [
-                time for time in task_completion_times if time > self.current_time
-            ]
-            next_event_times.extend(task_completion_times)
 
         # Add next case arrival time from future cases
         if len(self.future_cases) > 0:

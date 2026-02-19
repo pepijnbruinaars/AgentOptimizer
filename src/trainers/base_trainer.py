@@ -140,3 +140,25 @@ class TrainerLoggingMixin:
 
         if hasattr(self, "tb_logger"):
             self.tb_logger.close()
+
+    @staticmethod
+    def get_cooperative_step_reward(rewards: Dict[Any, Any]) -> float:
+        """Extract a single cooperative reward scalar from per-agent rewards."""
+        if not rewards:
+            return 0.0
+        return float(next(iter(rewards.values())))
+
+    @staticmethod
+    def get_assigned_agent_id(infos: Dict[Any, Any]) -> int | None:
+        """Read assignment metadata from the environment info payload."""
+        if not infos:
+            return None
+
+        first_info = next(iter(infos.values()))
+        if not isinstance(first_info, dict):
+            return None
+
+        assigned_agent_id = first_info.get("assigned_agent_id")
+        if assigned_agent_id is None:
+            return None
+        return int(assigned_agent_id)

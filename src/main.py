@@ -39,8 +39,23 @@ def get_device():
         return torch.device("cpu")
 
 
+def get_cooperative_step_reward(rewards: dict) -> float:
+    """Extract a single cooperative reward scalar from per-agent rewards."""
+    if not rewards:
+        return 0.0
+    return float(next(iter(rewards.values())))
+
+
 def train_mappo(
-    env, experiment_dir: str, total_training_episodes=50, policy_update_epochs=2, online_training=False, enable_tensorboard=True, disable_progress=False
+    env,
+    experiment_dir: str,
+    total_training_episodes=50,
+    policy_update_epochs=2,
+    online_training=False,
+    eval_freq_episodes=5,
+    eval_episodes=1,
+    enable_tensorboard=True,
+    disable_progress=False,
 ):
     """
     Train a MAPPO agent on the environment.
@@ -51,6 +66,8 @@ def train_mappo(
         total_training_episodes: Total number of training episodes to run
         policy_update_epochs: Number of epochs for each policy update (PPO inner loop)
         online_training: If True, use online training (update at every timestep, CPU only)
+        eval_freq_episodes: Run periodic evaluation every N training episodes
+        eval_episodes: Number of episodes per periodic evaluation
     """
     device = get_device()
     
@@ -91,8 +108,9 @@ def train_mappo(
             env,
             mappo_agent,
             total_training_episodes=total_training_episodes,
+            eval_freq_episodes=eval_freq_episodes,
             should_eval=True,
-            eval_episodes=3,
+            eval_episodes=eval_episodes,
             experiment_dir=experiment_dir,
             enable_tensorboard=enable_tensorboard,
             disable_progress=disable_progress,
@@ -102,8 +120,9 @@ def train_mappo(
             env,
             mappo_agent,
             total_training_episodes=total_training_episodes,  # Use the parameter
+            eval_freq_episodes=eval_freq_episodes,
             should_eval=True,  # Enable evaluation during training
-            eval_episodes=3,  # Number of evaluation episodes
+            eval_episodes=eval_episodes,
             experiment_dir=experiment_dir,
             enable_tensorboard=enable_tensorboard,
             disable_progress=disable_progress,
@@ -135,8 +154,8 @@ def evaluate_agent(env, agent, episodes=10, output_dir=None):
             # Execute actions
             observations, rewards, terminations, truncations, _ = env.step(actions)
 
-            # Sum rewards across all agents
-            step_reward = sum(rewards.values())
+            # Environment emits the same cooperative reward for every agent.
+            step_reward = get_cooperative_step_reward(rewards)
             episode_reward += step_reward
 
             # Check if episode is done
@@ -144,8 +163,6 @@ def evaluate_agent(env, agent, episodes=10, output_dir=None):
 
             if env_config.DEBUG:
                 env.render()
-
-        env.reset()
 
         total_rewards.append(episode_reward)
         print_colored(f"Episode {ep+1} reward: {episode_reward:.2f}", "green")
@@ -344,7 +361,16 @@ def get_model_architecture_summary(agent) -> str:
     return "\n".join(summary)
 
 
-def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=1028, enable_tensorboard=True, disable_progress=False):
+def train_qmix(
+    env,
+    experiment_dir: str,
+    total_training_episodes=50,
+    batch_size=1028,
+    eval_freq_episodes=5,
+    eval_episodes=1,
+    enable_tensorboard=True,
+    disable_progress=False,
+):
     """
     Train a QMIX agent on the environment.
 
@@ -353,6 +379,8 @@ def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=
         experiment_dir: Directory to save training results
         total_training_episodes: Total number of training episodes to run
         batch_size: Batch size for training
+        eval_freq_episodes: Run periodic evaluation every N training episodes
+        eval_episodes: Number of episodes per periodic evaluation
         enable_tensorboard: If True, enable TensorBoard logging
         disable_progress: If True, disable progress bars
     """
@@ -381,6 +409,8 @@ def train_qmix(env, experiment_dir: str, total_training_episodes=50, batch_size=
         batch_size=batch_size,
         buffer_size=10000,
         target_update_interval=100,
+        eval_freq_episodes=eval_freq_episodes,
+        eval_episodes=eval_episodes,
         enable_tensorboard=enable_tensorboard,
         disable_progress=disable_progress,
     )
@@ -437,6 +467,8 @@ def main(args):
             experiment_dir,
             total_training_episodes=args.training_episodes,
             batch_size=1028,
+            eval_freq_episodes=args.train_eval_freq,
+            eval_episodes=args.train_eval_episodes,
             enable_tensorboard=args.tensorboard,
             disable_progress=args.disable_progress,
         )
@@ -558,7 +590,7 @@ def main(args):
     while True:
         actions = {agent.id: np.random.choice([0, 1]) for agent in test_env.agents}
         observations, rewards, terminations, truncations, _ = test_env.step(actions)
-        step_reward = sum(rewards.values())
+        step_reward = get_cooperative_step_reward(rewards)
         episode_reward += step_reward
         cumulative_reward += step_reward
         step_count += 1
@@ -594,6 +626,8 @@ def main(args):
         total_training_episodes=args.training_episodes,  # Use configurable parameter
         policy_update_epochs=args.policy_epochs,  # Use configurable parameter
         online_training=args.online_training,  # Use online training flag
+        eval_freq_episodes=args.train_eval_freq,
+        eval_episodes=args.train_eval_episodes,
         enable_tensorboard=args.tensorboard,  # TensorBoard logging (enabled by default)
         disable_progress=args.disable_progress,  # Progress bars (enabled by default)
     )
@@ -692,6 +726,18 @@ if __name__ == "__main__":
         type=int,
         default=5,
         help="Number of policy update epochs per training episode",
+    )
+    parser.add_argument(
+        "--train-eval-freq",
+        type=int,
+        default=5,
+        help="Run periodic in-training evaluation every N episodes",
+    )
+    parser.add_argument(
+        "--train-eval-episodes",
+        type=int,
+        default=1,
+        help="Number of episodes for each periodic in-training evaluation",
     )
     parser.add_argument(
         "--model-path",

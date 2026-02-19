@@ -26,6 +26,7 @@ class RandomAgent:
         """Select random actions for all agents."""
         actions = {}
         action_probs = {}
+        _ = deterministic  # Keep strict-random behavior even in deterministic eval mode.
 
         for agent_id, obs in observations.items():
             if agent_id in [agent.id for agent in self.agents]:
@@ -49,6 +50,10 @@ class RandomAgent:
     def reset_history(self):
         """No history to reset for random agent."""
         pass
+
+    def set_seed(self, seed: int | None) -> None:
+        """Reset RNG state for reproducible baseline runs."""
+        self.rng = np.random.RandomState(seed)
 
 
 class BestMedianAgent:
@@ -320,7 +325,7 @@ class BaselineEvaluator:
                     )
 
                 # Accumulate rewards
-                episode_reward += sum(rewards.values())
+                episode_reward += float(next(iter(rewards.values()))) if rewards else 0.0
                 episode_length += 1
                 total_steps += 1
 

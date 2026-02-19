@@ -43,7 +43,7 @@ class MAPPOOnlineTrainer(TrainerLoggingMixin):
         env,
         mappo_agent: MAPPOAgent,
         total_training_episodes=50,
-        eval_freq_episodes=1,
+        eval_freq_episodes=5,
         save_freq_episodes=1,
         log_freq_episodes=10,
         eval_episodes=1,
@@ -130,26 +130,12 @@ class MAPPOOnlineTrainer(TrainerLoggingMixin):
                 value = self.agent.compute_values(obs)
 
                 # Take actions in the environment
-                next_obs, rewards, dones, truncated, _ = self.env.step(actions)
-                step_reward = float(sum(rewards.values()))
+                next_obs, rewards, dones, truncated, infos = self.env.step(actions)
+                step_reward = self.get_cooperative_step_reward(rewards)
                 episode_rewards.append(step_reward)
 
-                # Track assigned agent if a task was assigned
-                if (
-                    self.env.upcoming_case is not None
-                    and self.env.upcoming_case.current_task is not None
-                ):
-                    # Get the selected agent ID from the environment
-                    selected_agent_id = None
-                    for agent_id, action in actions.items():
-                        if action == 1 and self.env.agents[agent_id].can_perform_task(
-                            self.env.upcoming_case.current_task.id
-                        ):
-                            selected_agent_id = agent_id
-                            break
-                    episode_assigned_agents.append(selected_agent_id)
-                else:
-                    episode_assigned_agents.append(None)
+                # Track actual assignment metadata emitted by the environment.
+                episode_assigned_agents.append(self.get_assigned_agent_id(infos))
 
                 # Update cumulative rewards
                 self.total_cumulative_reward += step_reward
@@ -406,7 +392,7 @@ class MAPPOOnlineTrainer(TrainerLoggingMixin):
                 actions, _ = self.agent.select_actions(obs, deterministic=deterministic)
                 next_obs, rewards, dones, truncated, _ = self.env.step(actions)
 
-                step_reward = float(sum(rewards.values()))
+                step_reward = self.get_cooperative_step_reward(rewards)
                 episode_reward += step_reward
                 episode_cumulative_reward += step_reward
                 eval_cumulative_rewards.append(episode_cumulative_reward)
@@ -418,4 +404,4 @@ class MAPPOOnlineTrainer(TrainerLoggingMixin):
             eval_rewards.append(episode_reward)
 
         avg_reward = np.mean(eval_rewards)
-        return avg_reward, eval_rewards
+        return avg_reward, eval_cumulative_rewards
