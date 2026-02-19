@@ -392,6 +392,8 @@ class AgentOptimizerEnvironment(ParallelEnv):
 
         # Return early if simulation should stop
         if any(terminations.values()) or any(truncations.values()):
+            # Persist any buffered case/task rows before ending the episode.
+            self._flush_csv_buffer(force=True)
             return {}, rewards, terminations, truncations, infos
 
         ### --------------------------------------- ###
