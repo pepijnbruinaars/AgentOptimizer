@@ -30,13 +30,8 @@ import env_config
 from analysis.plot_distributions import plot_log_metrics
 
 
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
+# Import the shared get_device function from utils
+from utils import get_device
 
 
 def train_mappo(
